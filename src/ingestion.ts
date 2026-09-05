@@ -38,30 +38,39 @@ function strictUtf8(buffer: Buffer): string {
 }
 
 async function extractPdfPages(source: Buffer): Promise<string[]> {
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(source) });
-  const document = await loadingTask.promise;
+  const warning = console.warn;
+  const log = console.log;
+  console.warn = () => undefined;
+  console.log = () => undefined;
   try {
-    const pages: string[] = [];
-    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
-      const page = await document.getPage(pageNumber);
-      const content = await page.getTextContent();
-      const lines: string[] = [];
-      let line = "";
-      for (const item of content.items) {
-        if (!("str" in item)) continue;
-        line += item.str;
-        if (item.hasEOL) {
-          lines.push(line);
-          line = "";
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const loadingTask = pdfjs.getDocument({ data: new Uint8Array(source), verbosity: 0 });
+    const document = await loadingTask.promise;
+    try {
+      const pages: string[] = [];
+      for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+        const page = await document.getPage(pageNumber);
+        const content = await page.getTextContent();
+        const lines: string[] = [];
+        let line = "";
+        for (const item of content.items) {
+          if (!("str" in item)) continue;
+          line += item.str;
+          if (item.hasEOL) {
+            lines.push(line);
+            line = "";
+          }
         }
+        if (line) lines.push(line);
+        pages.push(lines.join("\n"));
       }
-      if (line) lines.push(line);
-      pages.push(lines.join("\n"));
+      return pages;
+    } finally {
+      await document.destroy();
     }
-    return pages;
   } finally {
-    await document.destroy();
+    console.warn = warning;
+    console.log = log;
   }
 }
 

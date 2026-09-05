@@ -19,7 +19,7 @@ export interface CitationAuditClaim {
 }
 
 export interface AuditResult {
-  accepted: Omit<Finding, "id" | "action_candidate"> & { action_candidate: { description: string; action_type: "assess" | "implement" | "monitor" | "respond" | "validate"; review_disposition: "not_required" } | null }[];
+  accepted: (Omit<Finding, "id" | "action_candidate"> & { action_candidate: { description: string; action_type: "assess" | "implement" | "monitor" | "respond" | "validate"; review_disposition: "not_required" } | null })[];
   rejected: RejectedFinding[];
   claims: CitationAuditClaim[];
   duplicate_decisions: { outcome: "deduplicated_within_finding" | "reused_across_findings" | "duplicate_finding"; finding_reference: string; related_finding_reference?: string }[];

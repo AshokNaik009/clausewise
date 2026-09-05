@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { readFile, unlink } from "node:fs/promises";
+import { chmod, readFile, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server } from "node:net";
-import { basename, join, normalize, relative } from "node:path";
+import { join, normalize, relative } from "node:path";
 import { getQuickJS } from "quickjs-emscripten";
 import { LIMITS } from "./constants.js";
 import { RegCompareError } from "./errors.js";
@@ -117,7 +117,7 @@ export async function executeQuickJs(workspace: Workspace, requestValue: unknown
       if (!request.requested_writes.includes(path) || !capabilities.allowedWrites.includes(path) || !safeOutputPath(path)) throw new Error("Artifact write denied");
       if (Buffer.byteLength(content) > LIMITS.quickJsReadBytes) throw new Error("QuickJS write result limit exceeded");
       written.set(path, content);
-      return context.newBool(true);
+      return context.newNumber(1);
     });
     context.setProp(context.global, "listArtifacts", listArtifacts);
     context.setProp(context.global, "readArtifact", readArtifact);
@@ -225,11 +225,11 @@ export async function startQuickJsBroker(workspace: Workspace, scratchDirectory:
     server.once("error", reject);
     server.listen(socketPath, () => resolve());
   });
+  await chmod(socketPath, 0o600);
   return { socketPath, capabilityFile, close: () => closeServer(server, socketPath) };
 }
 
 export async function invokeQuickJsBridge(socketPath: string, capabilityFile: string, callerRole: QuickJsCallerRole, scriptPath: string, requestedReads: string[] = [], requestedWrites: string[] = []): Promise<unknown> {
-  if (basename(scriptPath) !== scriptPath && !safeOutputPath(scriptPath)) throw new RegCompareError("quickjs_invalid_script", "QuickJS script path is invalid.", 1);
   const [capability, script] = await Promise.all([readFile(capabilityFile, "utf8"), readFile(scriptPath, "utf8")]);
   const response = await readOneMessage(socketPath, JSON.stringify({ capability: capability.trim(), caller_role: callerRole, script, requested_reads: requestedReads, requested_writes: requestedWrites }));
   return JSON.parse(response);

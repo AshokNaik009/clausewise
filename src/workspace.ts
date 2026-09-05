@@ -39,6 +39,22 @@ export interface RunManifest {
 const privateMode = 0o700;
 const privateFileMode = 0o600;
 const workspaceDirectories = ["events", "logs", "sources/raw", "sources/normalized", "planning", "context", "reviews", "workers", "quickjs", "audit", "drafts", "scratch"];
+const eventQueues = new Map<string, Promise<void>>();
+
+async function serializeWorkspace<T>(workspace: Workspace, operation: () => Promise<T>): Promise<T> {
+  const prior = eventQueues.get(workspace.root) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  const queued = prior.then(() => current);
+  eventQueues.set(workspace.root, queued);
+  await prior;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (eventQueues.get(workspace.root) === queued) eventQueues.delete(workspace.root);
+  }
+}
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -203,19 +219,23 @@ export async function readEvent(workspace: Workspace, sequence: number): Promise
 }
 
 export async function appendEvent(workspace: Workspace, type: EventRecord["type"], actor: EventRecord["actor"], payload: Record<string, unknown>): Promise<EventRecord> {
-  const state = await getState(workspace);
-  const event = await nextEvent(workspace, type, actor, payload, state);
-  await writeJson(artifactPath(workspace, "run-state.json"), runStateSchema.parse({ ...state, updated_at: event.timestamp, last_event_sequence: event.sequence }));
-  return event;
+  return serializeWorkspace(workspace, async () => {
+    const state = await getState(workspace);
+    const event = await nextEvent(workspace, type, actor, payload, state);
+    await writeJson(artifactPath(workspace, "run-state.json"), runStateSchema.parse({ ...state, updated_at: event.timestamp, last_event_sequence: event.sequence }));
+    return event;
+  });
 }
 
 export async function transitionState(workspace: Workspace, nextState: RunState["state"], patch: Partial<Omit<RunState, "schema_version" | "run_id" | "state" | "updated_at" | "last_event_sequence">> = {}): Promise<RunState> {
-  const previous = await getState(workspace);
-  const timestamp = new Date().toISOString();
-  const next = runStateSchema.parse({ ...previous, ...patch, state: nextState, updated_at: timestamp, last_event_sequence: previous.last_event_sequence + 1 });
-  await nextEvent(workspace, "state_transition", "coordinator", { from: previous.state, to: nextState, state: next }, previous, timestamp);
-  await writeJson(artifactPath(workspace, "run-state.json"), next);
-  return next;
+  return serializeWorkspace(workspace, async () => {
+    const previous = await getState(workspace);
+    const timestamp = new Date().toISOString();
+    const next = runStateSchema.parse({ ...previous, ...patch, state: nextState, updated_at: timestamp, last_event_sequence: previous.last_event_sequence + 1 });
+    await nextEvent(workspace, "state_transition", "coordinator", { from: previous.state, to: nextState, state: next }, previous, timestamp);
+    await writeJson(artifactPath(workspace, "run-state.json"), next);
+    return next;
+  });
 }
 
 export async function recordArtifact(workspace: Workspace, artifact: string): Promise<void> {

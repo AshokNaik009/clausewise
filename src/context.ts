@@ -101,7 +101,7 @@ function markerScore(record: NormalizedRecord): number {
 
 function addWithinLimit(selected: NormalizedRecord[], candidate: NormalizedRecord, maxChars: number, usedCharacters: { value: number }): boolean {
   if (selected.some((record) => record.record_id === candidate.record_id)) return true;
-  if (selected.length > 0 && usedCharacters.value + candidate.canonical_text.length > maxChars) return false;
+  if (usedCharacters.value + candidate.canonical_text.length > maxChars) return false;
   selected.push(candidate);
   usedCharacters.value += candidate.canonical_text.length;
   return true;
@@ -185,7 +185,7 @@ export function buildThemePacket(theme: { theme_id: string; label: string; descr
     if (selectedIds.has(record.record_id)) return true;
     const region = `${record.record_id.startsWith("baseline:") ? "baseline" : "candidate"}:${regionFor(record)}`;
     if ((perRegion.get(region) ?? 0) >= 4) return false;
-    if (selected.length >= maxRecords || (selected.length > 0 && usedCharacters.value + record.canonical_text.length > maxChars)) return false;
+    if (selected.length >= maxRecords || usedCharacters.value + record.canonical_text.length > maxChars) return false;
     selected.push(record);
     selectedIds.add(record.record_id);
     perRegion.set(region, (perRegion.get(region) ?? 0) + 1);
@@ -205,6 +205,14 @@ export function buildThemePacket(theme: { theme_id: string; label: string; descr
     const document = sourceForRecord(documents, seed);
     const record = document?.records.find((candidate) => candidate.record_id === seed);
     if (record) addWithNeighborhood(record);
+  }
+  for (const documentId of ["baseline", "candidate"] as const) {
+    const available = ordered.filter((record) => record.record_id.startsWith(`${documentId}:`));
+    for (const record of available) {
+      const selectedFromDocument = selected.filter((candidate) => candidate.record_id.startsWith(`${documentId}:`)).length;
+      if (selectedFromDocument >= Math.min(4, available.length) || selected.length >= maxRecords || usedCharacters.value >= maxChars) break;
+      addWithNeighborhood(record);
+    }
   }
   for (const record of ordered) {
     if (selected.length >= maxRecords || (selected.length > 0 && usedCharacters.value >= maxChars)) break;

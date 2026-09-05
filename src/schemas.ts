@@ -213,6 +213,14 @@ export const analysisSchema = z.object({
   rendered_report_sha256: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 
+export const conversationProgressSchema = z.object({
+  schema_version: schemaVersion,
+  plan_round: z.number().int().positive(),
+  themes: z.array(themeResultSchema),
+  excluded_themes: z.array(excludedThemeSchema),
+  mapper_body_sample_ratio: z.number().min(0).max(1),
+}).strict();
+
 export const eventSchema = z.object({
   schema_version: schemaVersion,
   run_id: z.string().uuid(),
@@ -254,5 +262,6 @@ export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 export type ThemeResult = z.infer<typeof themeResultSchema>;
 export type Finding = z.infer<typeof findingSchema>;
 export type Analysis = z.infer<typeof analysisSchema>;
+export type ConversationProgress = z.infer<typeof conversationProgressSchema>;
 export type EventRecord = z.infer<typeof eventSchema>;
 export type RunState = z.infer<typeof runStateSchema>;
