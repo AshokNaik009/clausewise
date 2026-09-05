@@ -1,0 +1,11 @@
+{
+  "expected_profile": "cross-guidance",
+  "min_published_findings": 3,
+  "required_concept_ids": [
+    "customer-due-diligence",
+    "beneficial-ownership",
+    "red-flag-indicators",
+    "risk-based-approach"
+  ],
+  "minimum_action_counts": { "assess": 1 }
+}

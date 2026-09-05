@@ -1,0 +1,141 @@
+{
+  "schema_version": "1.0",
+  "fixtures": [
+    {
+      "id": "cbuae-str-guidance-2021",
+      "title": "Guidance for Licensed Financial Institutions on Suspicious Transaction Reporting",
+      "publisher": "Central Bank of the United Arab Emirates",
+      "jurisdiction": "UAE",
+      "status": "superseded",
+      "publication_date": "2021-06-07",
+      "original_url": "https://rulebook.centralbank.ae/sites/default/files/en_net_file_store/CBUAE_EN_418_VER1.pdf",
+      "source_sha256": "d9b50225157160a23e1c92c4b5535beaa2688fb411f0aaecedc633f6d5298ec2",
+      "local_path": null,
+      "fetch_state": "operator_fetch_required",
+      "applicable_profiles": [
+        "version-change"
+      ],
+      "license_terms_review": "Public CBUAE Rulebook material. Redistribution terms not expressly granted; metadata and pinned hash only, operator fetches the source into the ignored local cache.",
+      "expectation_manifest_path": "fixtures/expectations/version-change-str.json"
+    },
+    {
+      "id": "cbuae-str-guidance-2022",
+      "title": "Guidance for Licensed Financial Institutions on Suspicious Transaction Reporting",
+      "publisher": "Central Bank of the United Arab Emirates",
+      "jurisdiction": "UAE",
+      "status": "in force",
+      "publication_date": "2022-08-03",
+      "original_url": "https://rulebook.centralbank.ae/sites/default/files/en_net_file_store/CBUAE_EN_418_VER2.pdf",
+      "source_sha256": "5ca8b7b712e5bea66be4e7e95687eb664e2beed1b77485327b3293e0bceec2e0",
+      "local_path": null,
+      "fetch_state": "operator_fetch_required",
+      "applicable_profiles": [
+        "version-change"
+      ],
+      "license_terms_review": "Public CBUAE Rulebook material. Redistribution terms not expressly granted; metadata and pinned hash only, operator fetches the source into the ignored local cache.",
+      "expectation_manifest_path": "fixtures/expectations/version-change-str.json"
+    },
+    {
+      "id": "dfsa-aml-module-ver13",
+      "title": "DFSA Rulebook Anti-Money Laundering, Counter-Terrorist Financing and Sanctions Module (AML/VER13/02-17)",
+      "publisher": "Dubai Financial Services Authority",
+      "jurisdiction": "UAE",
+      "status": "superseded",
+      "publication_date": "2017-02-01",
+      "original_url": "https://dfsaen.thomsonreuters.com/sites/default/files/net_file_store/DFSA1547_20015_VER130.pdf",
+      "source_sha256": "f14058cb6647ba4b3b3483ad30ff75b0c945f00d6d01c60a9066546e3ae7e888",
+      "local_path": null,
+      "fetch_state": "operator_fetch_required",
+      "applicable_profiles": [
+        "consultation-impact"
+      ],
+      "license_terms_review": "Public DFSA Rulebook consolidated module. Redistribution terms not expressly granted; metadata and pinned hash only. publication_date is derived from the module version stamp AML/VER13/02-17, which gives month and year only; the day is a placeholder. NOT VERIFIED: whether VER13 was still the version in force when CP 120 was published on 2018-04-18. A VER14 may sit between AML/VER13/02-17 and AML/VER15/07-18; no consolidated PDF for it was found and neither module carries an amendment-history table.",
+      "expectation_manifest_path": "fixtures/expectations/consultation-impact-aml.json"
+    },
+    {
+      "id": "dfsa-cp120-aml-consultation",
+      "title": "Consultation Paper No. 120 - Proposed Changes to the DFSA's Anti Money Laundering, Counter-Terrorist Financing and Sanctions Regime - Phase 2",
+      "publisher": "Dubai Financial Services Authority",
+      "jurisdiction": "UAE",
+      "status": "closed consultation",
+      "publication_date": "2018-04-18",
+      "original_url": "https://dfsaen.thomsonreuters.com/sites/default/files/net_file_store/CP120_Changes_to_the_DFSAs_AML_Regime_Phase_2.pdf",
+      "source_sha256": "69dbe526848e2415c2f4d1342859a470343ea162cea640e0317621ba12f5f991",
+      "local_path": null,
+      "fetch_state": "operator_fetch_required",
+      "applicable_profiles": [
+        "consultation-impact"
+      ],
+      "license_terms_review": "Public DFSA consultation paper. Redistribution terms not expressly granted; metadata and pinned hash only.",
+      "expectation_manifest_path": "fixtures/expectations/consultation-impact-aml.json"
+    },
+    {
+      "id": "cbuae-legal-persons-guidance",
+      "title": "Guidance for Licensed Financial Institutions Providing Services to Legal Persons and Arrangements",
+      "publisher": "Central Bank of the United Arab Emirates",
+      "jurisdiction": "UAE",
+      "status": "in force",
+      "publication_date": "2021-06-07",
+      "original_url": "https://rulebook.centralbank.ae/sites/default/files/en_net_file_store/CBUAE_EN_699_VER1.pdf",
+      "source_sha256": "bded496c822ae0ba194cad30ce65826e57ce0a91ebfc735b04b4be23c209260d",
+      "local_path": null,
+      "fetch_state": "operator_fetch_required",
+      "applicable_profiles": [
+        "cross-guidance"
+      ],
+      "license_terms_review": "Public CBUAE Rulebook material. Redistribution terms not expressly granted; metadata and pinned hash only.",
+      "expectation_manifest_path": "fixtures/expectations/cross-guidance-cdd.json"
+    },
+    {
+      "id": "cbuae-cash-intensive-guidance",
+      "title": "Guidance for Licensed Financial Institutions Providing Services to Cash-intensive Businesses",
+      "publisher": "Central Bank of the United Arab Emirates",
+      "jurisdiction": "UAE",
+      "status": "in force",
+      "publication_date": "2021-09-27",
+      "original_url": "https://rulebook.centralbank.ae/sites/default/files/en_net_file_store/CBUAE_EN_915_VER1.pdf",
+      "source_sha256": "84a66eeff77809d0f7ec859d91ecd2d5fffa0fd9f8f73329fe60df443899ac36",
+      "local_path": null,
+      "fetch_state": "operator_fetch_required",
+      "applicable_profiles": [
+        "cross-guidance"
+      ],
+      "license_terms_review": "Public CBUAE Rulebook material. Redistribution terms not expressly granted; metadata and pinned hash only.",
+      "expectation_manifest_path": "fixtures/expectations/cross-guidance-cdd.json"
+    },
+    {
+      "id": "cbuae-tm-screening-guidance",
+      "title": "Guidance for Licensed Financial Institutions on Transaction Monitoring and Sanctions Screening",
+      "publisher": "Central Bank of the United Arab Emirates",
+      "jurisdiction": "UAE",
+      "status": "in force",
+      "publication_date": "2021-09-08",
+      "original_url": "https://rulebook.centralbank.ae/sites/default/files/en_net_file_store/CBUAE_EN_949_VER1.pdf",
+      "source_sha256": "d782fc79fc1e2ec66a2d4a9938b72cf74a4c6872585c708f2021a1f0c33c36a0",
+      "local_path": null,
+      "fetch_state": "operator_fetch_required",
+      "applicable_profiles": [
+        "policy-gap"
+      ],
+      "license_terms_review": "Public CBUAE Rulebook material. Redistribution terms not expressly granted; metadata and pinned hash only.",
+      "expectation_manifest_path": "fixtures/expectations/policy-gap-screening.json"
+    },
+    {
+      "id": "enbd-group-policies",
+      "title": "Emirates NBD Group Policies",
+      "publisher": "Emirates NBD Bank PJSC",
+      "jurisdiction": "UAE",
+      "status": "published corporate disclosure",
+      "publication_date": "2026-01-01",
+      "original_url": "https://www.emiratesnbd.com/-/media/enbd/files/sustainability/group_policy_repository.pdf",
+      "source_sha256": "f2b4f96cc12ec716fc1689c6a753ca687a06e82b0c003977ff717fd0ac8ec252",
+      "local_path": null,
+      "fetch_state": "operator_fetch_required",
+      "applicable_profiles": [
+        "policy-gap"
+      ],
+      "license_terms_review": "Public corporate disclosure; not redistributed. WARNING: this URL is not version-pinned and the publisher replaces the file in place, so the pinned hash will break on their next revision and requires a controlled fixture refresh. The document title carries the year 2026 with no day-level date; publication_date is an approximation. Public policy posture only, never evidence of the complete internal control environment.",
+      "expectation_manifest_path": "fixtures/expectations/policy-gap-screening.json"
+    }
+  ]
+}

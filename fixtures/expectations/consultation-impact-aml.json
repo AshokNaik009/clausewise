@@ -1,0 +1,13 @@
+{
+  "expected_profile": "consultation-impact",
+  "min_published_findings": 4,
+  "required_concept_ids": [
+    "customer-due-diligence",
+    "beneficial-ownership",
+    "enhanced-due-diligence",
+    "simplified-due-diligence",
+    "life-insurance-beneficiary"
+  ],
+  "minimum_materiality_counts": { "medium": 1 },
+  "minimum_action_counts": { "assess": 1 }
+}
