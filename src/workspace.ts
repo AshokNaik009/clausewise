@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { access, appendFile, chmod, lstat, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { RegCompareError, assert } from "./errors.js";
-import { eventSchema, runStateSchema, type Classification, type DocumentRef, type EventRecord, type Profile, type RunState } from "./schemas.js";
+import { eventSchema, runManifestSchema, runStateSchema, type Classification, type DocumentRef, type EventRecord, type Profile, type RunState } from "./schemas.js";
 
 export interface RunOptions {
   profile: Profile;
@@ -15,7 +15,7 @@ export interface RunOptions {
   maxSourceChars: number;
   allowPartial: boolean;
   autoApprove: boolean;
-  confirmExternalAgentAccess: boolean;
+  confirmExternalModelAccess: boolean;
   confirmEncryptedWorkspace: boolean;
   retentionUntil: string | null;
 }
@@ -25,6 +25,15 @@ export interface Workspace {
   runId: string;
 }
 
+export interface ModelProvenance {
+  model: string;
+  base_url: string;
+  temperature: number;
+  provider_order: string[];
+  allow_fallbacks: false;
+  data_collection: "deny";
+}
+
 export interface RunManifest {
   schema_version: "1.0";
   run_id: string;
@@ -32,6 +41,7 @@ export interface RunManifest {
   profile: Profile;
   options: RunOptions;
   data_classification: Classification;
+  model: ModelProvenance;
   documents: DocumentRef[];
   normalization_version: "canon-v1";
 }
@@ -170,7 +180,7 @@ export async function createWorkspace(root: string, manifest: Omit<RunManifest, 
   await ensurePrivateDirectory(root);
   for (const directory of workspaceDirectories) await ensurePrivateDirectory(join(root, directory));
   const workspace = { root: resolve(root), runId: randomUUID() };
-  const runManifest: RunManifest = { schema_version: "1.0", run_id: workspace.runId, created_at: new Date().toISOString(), ...manifest };
+  const runManifest = runManifestSchema.parse({ schema_version: "1.0", run_id: workspace.runId, created_at: new Date().toISOString(), ...manifest });
   await writeImmutableJson(artifactPath(workspace, "manifest.json"), runManifest);
   const createdAt = new Date().toISOString();
   const state = runStateSchema.parse({
@@ -202,7 +212,9 @@ export async function createWorkspace(root: string, manifest: Omit<RunManifest, 
 }
 
 export async function getManifest(workspace: Workspace): Promise<RunManifest> {
-  return await readJson<RunManifest>(artifactPath(workspace, "manifest.json"));
+  const manifest = runManifestSchema.safeParse(await readJson<unknown>(artifactPath(workspace, "manifest.json")));
+  if (!manifest.success) throw new RegCompareError("manifest_incompatible", "Run manifest does not satisfy the current schema, including required model provenance. This run cannot be resumed safely.", 6);
+  return manifest.data;
 }
 
 export async function getState(workspace: Workspace): Promise<RunState> {
@@ -224,6 +236,24 @@ export async function appendEvent(workspace: Workspace, type: EventRecord["type"
     const event = await nextEvent(workspace, type, actor, payload, state);
     await writeJson(artifactPath(workspace, "run-state.json"), runStateSchema.parse({ ...state, updated_at: event.timestamp, last_event_sequence: event.sequence }));
     return event;
+  });
+}
+
+export async function reserveModelCall(workspace: Workspace, role: "mapper" | "theme_worker", themeId: string | null): Promise<boolean> {
+  return serializeWorkspace(workspace, async () => {
+    const previous = await getState(workspace);
+    if (previous.remaining_agent_calls <= 0) return false;
+    const timestamp = new Date().toISOString();
+    const next = runStateSchema.parse({
+      ...previous,
+      updated_at: timestamp,
+      used_agent_calls: previous.used_agent_calls + 1,
+      remaining_agent_calls: previous.remaining_agent_calls - 1,
+      last_event_sequence: previous.last_event_sequence + 1,
+    });
+    await nextEvent(workspace, "model_call_started", "worker", { role, theme_id: themeId, model_call_number: next.used_agent_calls, state: next }, previous, timestamp);
+    await writeJson(artifactPath(workspace, "run-state.json"), next);
+    return true;
   });
 }
 
@@ -272,9 +302,9 @@ export async function assertWorkspace(path: string): Promise<Workspace> {
   const root = resolve(path);
   const info = await lstat(root).catch(() => null);
   if (!info?.isDirectory() || info.isSymbolicLink()) throw new RegCompareError("invalid_run", `Run directory does not exist: ${root}`, 6);
-  const manifest = await readJson<RunManifest>(join(root, "manifest.json")).catch(() => null);
-  if (!manifest?.run_id) throw new RegCompareError("invalid_run", `Run manifest is missing or invalid: ${root}`, 6);
-  return { root, runId: manifest.run_id };
+  const manifest = runManifestSchema.safeParse(await readJson<unknown>(join(root, "manifest.json")).catch(() => null));
+  if (!manifest.success) throw new RegCompareError("manifest_incompatible", `Run manifest is missing or incompatible with the current schema: ${root}`, 6);
+  return { root, runId: manifest.data.run_id };
 }
 
 export async function validateLedger(workspace: Workspace): Promise<RunState> {
@@ -284,22 +314,38 @@ export async function validateLedger(workspace: Workspace): Promise<RunState> {
   if (!entries.length) throw new RegCompareError("ledger_empty", "Run ledger contains no events.", 6);
   let reconstructed: RunState | null = null;
   let previousHash: string | null = null;
+  let modelCallCount = 0;
   for (const [index, entry] of entries.entries()) {
     const event = eventSchema.parse(await readJson(join(artifactPath(workspace, "events"), entry)));
     const expectedSequence = index + 1;
     if (event.sequence !== expectedSequence || !entry.startsWith(`${String(expectedSequence).padStart(6, "0")}-`)) throw new RegCompareError("ledger_sequence", "Run ledger event sequence is not contiguous.", 6);
     if (event.run_id !== workspace.runId || event.previous_event_sha256 !== previousHash) throw new RegCompareError("ledger_chain", "Run ledger hash chain is invalid.", 6);
     previousHash = createHash("sha256").update(JSON.stringify(event) + "\n").digest("hex");
-    if (event.type === "state_transition") {
+    if (event.type === "model_call_started") {
+      modelCallCount += 1;
+      const payload = event.payload as { role?: unknown; theme_id?: unknown; model_call_number?: unknown };
+      if (payload.model_call_number !== modelCallCount) throw new RegCompareError("model_call_ledger", "Model-call ledger numbering is not contiguous.", 6);
+      if (payload.role !== "mapper" && payload.role !== "theme_worker") throw new RegCompareError("model_call_ledger", "Model-call ledger has an invalid worker role.", 6);
+      if ((payload.role === "mapper" && payload.theme_id !== null) || (payload.role === "theme_worker" && (typeof payload.theme_id !== "string" || !/^thm-\d{3}-[a-z0-9]+(?:-[a-z0-9]+){0,8}$/u.test(payload.theme_id)))) {
+        throw new RegCompareError("model_call_ledger", "Model-call ledger has an invalid theme association.", 6);
+      }
+    }
+    if (event.type === "state_transition" || event.type === "model_call_started") {
       const payloadState = (event.payload as { state?: unknown }).state;
       reconstructed = runStateSchema.parse(payloadState);
-      if (reconstructed.last_event_sequence !== event.sequence || reconstructed.updated_at !== event.timestamp) throw new RegCompareError("ledger_projection", "State-transition event has an invalid projection.", 6);
+      if (reconstructed.last_event_sequence !== event.sequence || reconstructed.updated_at !== event.timestamp) throw new RegCompareError("ledger_projection", "State projection event is invalid.", 6);
+      if (event.type === "model_call_started" && (reconstructed.used_agent_calls !== modelCallCount || reconstructed.remaining_agent_calls !== manifest.options.agentCallBudget - modelCallCount)) {
+        throw new RegCompareError("model_call_ledger", "Model-call state projection does not match the immutable call ledger.", 6);
+      }
     } else if (reconstructed) {
       reconstructed = runStateSchema.parse({ ...reconstructed, last_event_sequence: event.sequence, updated_at: event.timestamp });
     }
   }
   if (!reconstructed) throw new RegCompareError("ledger_projection", "Run ledger has no state transition.", 6);
   const current = await getState(workspace);
+  if (current.used_agent_calls !== modelCallCount || current.remaining_agent_calls !== manifest.options.agentCallBudget - modelCallCount || current.used_agent_calls + current.remaining_agent_calls !== manifest.options.agentCallBudget) {
+    throw new RegCompareError("model_call_ledger", "Model-call counters do not match the immutable call ledger and configured budget.", 6);
+  }
   if (JSON.stringify(current) !== JSON.stringify(reconstructed)) throw new RegCompareError("corrupt", "run-state.json does not match the immutable event ledger.", 6);
   return current;
 }

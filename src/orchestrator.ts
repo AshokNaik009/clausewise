@@ -6,13 +6,14 @@ import { invokeSemanticDelegate } from "./agents.js";
 import { buildMapperPacket, buildThemePacket, type ThemePacket } from "./context.js";
 import { RegCompareError } from "./errors.js";
 import { ingestDocument, type IngestedDocument } from "./ingestion.js";
+import { assertExternalModelConfigured } from "./model.js";
 import { canonicalizeExcerpt, sha256 } from "./normalization.js";
 import { parseRunInput, runOptions, validateSourceInputs, type RawRunInput, type RunInput } from "./options.js";
 import { assertDoctor } from "./preflight.js";
 import { renderReport, reportHash } from "./report.js";
 import { collectReview, createReviewRecord, ensureFinalReview, saveReview } from "./reviews.js";
 import { analysisSchema, approvedPlanSchema, conversationProgressSchema, mapperProposalSchema, normalizedDocumentSchema, reviewRecordSchema, themeResultSchema, type Analysis, type ApprovedPlan, type ConversationProgress, type Finding, type MapperProposal, type NormalizedDocument, type Profile, type ThemeResult } from "./schemas.js";
-import { artifactPath, acquireLock, appendEvent, appendOperationalLog, assertWorkspace, createWorkspace, getManifest, getState, readEvent, readJson, recordArtifact, releaseLock, transitionState, validateLedger, writeImmutableFile, writeImmutableJson, type Workspace } from "./workspace.js";
+import { artifactPath, acquireLock, appendEvent, appendOperationalLog, assertWorkspace, createWorkspace, getManifest, getState, readEvent, readJson, recordArtifact, releaseLock, reserveModelCall, transitionState, validateLedger, writeImmutableFile, writeImmutableJson, type RunOptions, type Workspace } from "./workspace.js";
 
 interface PlanThemeSeed {
   label: string;
@@ -134,16 +135,14 @@ async function writeArtifact(workspace: Workspace, relativePath: string, value: 
   await recordArtifact(workspace, relativePath);
 }
 
-async function reserveAgentCall(workspace: Workspace, role: "mapper" | "theme_worker", themeId: string | null): Promise<boolean> {
+async function startAgentCall(workspace: Workspace, role: "mapper" | "theme_worker", themeId: string | null): Promise<void> {
   const state = await getState(workspace);
-  if (state.remaining_agent_calls <= 0) return false;
-  await appendEvent(workspace, "worker_started", "coordinator", { role, theme_id: themeId, attempt: state.used_agent_calls + 1 });
-  await transitionState(workspace, state.state, {
-    used_agent_calls: state.used_agent_calls + 1,
-    remaining_agent_calls: state.remaining_agent_calls - 1,
-    worker_statuses: themeId ? { ...state.worker_statuses, [themeId]: "running" } : state.worker_statuses,
-  });
-  return true;
+  await appendEvent(workspace, "worker_started", "coordinator", { role, theme_id: themeId });
+  if (themeId) await transitionState(workspace, state.state, { worker_statuses: { ...state.worker_statuses, [themeId]: "running" } });
+}
+
+async function reserveAgentCall(workspace: Workspace, role: "mapper" | "theme_worker", themeId: string | null): Promise<boolean> {
+  return reserveModelCall(workspace, role, themeId);
 }
 
 async function finishAgentCall(workspace: Workspace, role: "mapper" | "theme_worker", themeId: string | null, outcome: string): Promise<void> {
@@ -153,31 +152,46 @@ async function finishAgentCall(workspace: Workspace, role: "mapper" | "theme_wor
 }
 
 async function mapperAttempt(workspace: Workspace, input: RunInput, packet: unknown, attempt: number): Promise<RawThemeAttempt> {
-  if (!await reserveAgentCall(workspace, "mapper", null)) return { attempt, artifact: null, result: null, error: "call_budget_exhausted" };
+  await startAgentCall(workspace, "mapper", null);
   try {
-    const delegate = await invokeSemanticDelegate({ role: "mapper", profile: input.profile, timeoutSeconds: input.agentTimeoutSeconds, workspace, contextPacket: packet, attempt });
+    const delegate = await invokeSemanticDelegate({
+      role: "mapper",
+      profile: input.profile,
+      timeoutSeconds: input.agentTimeoutSeconds,
+      workspace,
+      contextPacket: packet,
+      attempt,
+      reserveModelCall: async () => {
+        if (!await reserveAgentCall(workspace, "mapper", null)) throw new RegCompareError("agent_call_budget_exhausted", "The analysis model-call budget is exhausted.", 5);
+      },
+    });
     await recordArtifact(workspace, delegate.artifact);
     const resultArtifact = `planning/mapper-result-${attempt}.json`;
     await writeArtifact(workspace, resultArtifact, delegate.value);
     await finishAgentCall(workspace, "mapper", null, delegate.process.outcome);
     return { attempt, artifact: resultArtifact, result: delegate.value, error: delegate.process.outcome === "ok" ? null : delegate.process.outcome };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = error instanceof RegCompareError ? error.code : "model_error";
     await appendOperationalLog(workspace, "error", "mapper", "delegate_failed", "Mapper delegate failed before producing a durable result.", { error: message });
-    await finishAgentCall(workspace, "mapper", null, "failed");
+    await finishAgentCall(workspace, "mapper", null, message);
     return { attempt, artifact: null, result: null, error: message };
   }
+}
+
+async function nextMapperAttempt(workspace: Workspace): Promise<number> {
+  const attempts = (await readdir(artifactPath(workspace, "planning"))).map((name) => /^mapper-attempt-(\d+)\.json$/u.exec(name)?.[1]).filter((value): value is string => Boolean(value)).map(Number);
+  return Math.max(0, ...attempts) + 1;
 }
 
 async function createPlan(workspace: Workspace, input: RunInput, documents: NormalizedDocument[], round: number, amendment: string | null = null): Promise<ApprovedPlan> {
   const mapperPacket = buildMapperPacket(input.profile, documents);
   const packet = amendment ? { ...mapperPacket, amendment } : mapperPacket;
   await writeArtifact(workspace, `context/mapper/packet-${round}.json`, packet);
-  const primary = await mapperAttempt(workspace, input, packet, (await getState(workspace)).used_agent_calls + 1);
+  const primary = await mapperAttempt(workspace, input, packet, await nextMapperAttempt(workspace));
   let mapper = primary;
   if (mapper.error || !mapper.artifact || !mapperProposalSchema.safeParse(mapper.result).success) {
-    if (round > 1 || (await getState(workspace)).used_agent_calls >= 2) throw new RegCompareError("mapper_failed", "Mapper revision failed after the allowed semantic amendment.", 5);
-    mapper = await mapperAttempt(workspace, input, packet, (await getState(workspace)).used_agent_calls + 1);
+    if (round > 1 || (await getState(workspace)).remaining_agent_calls <= 0) throw new RegCompareError("mapper_failed", "Mapper revision failed after the allowed semantic amendment or exhausted the model-call budget.", 5);
+    mapper = await mapperAttempt(workspace, input, packet, await nextMapperAttempt(workspace));
   }
   if (mapper.error || !mapper.artifact || !mapperProposalSchema.safeParse(mapper.result).success) throw new RegCompareError("mapper_failed", "Mapper failed after its single corrective retry.", 5);
   const used = (await getState(workspace)).used_agent_calls;
@@ -197,17 +211,28 @@ async function nextThemeAttempt(workspace: Workspace, themeId: string): Promise<
   }
 }
 
-async function invokeTheme(workspace: Workspace, input: RunInput, pending: PendingTheme, attempt: number, reserve = reserveAgentCall, finish = finishAgentCall): Promise<RawThemeAttempt> {
-  if (!await reserve(workspace, "theme_worker", pending.theme.theme_id)) return { attempt, artifact: null, result: null, error: "call_budget_exhausted" };
+async function invokeTheme(workspace: Workspace, input: RunInput, pending: PendingTheme, attempt: number, reserve = reserveAgentCall, finish = finishAgentCall, start = startAgentCall): Promise<RawThemeAttempt> {
+  await start(workspace, "theme_worker", pending.theme.theme_id);
   try {
-    const delegate = await invokeSemanticDelegate({ role: "theme_worker", profile: input.profile, timeoutSeconds: input.agentTimeoutSeconds, workspace, contextPacket: pending.packet, themeId: pending.theme.theme_id, attempt });
+    const delegate = await invokeSemanticDelegate({
+      role: "theme_worker",
+      profile: input.profile,
+      timeoutSeconds: input.agentTimeoutSeconds,
+      workspace,
+      contextPacket: pending.packet,
+      themeId: pending.theme.theme_id,
+      attempt,
+      reserveModelCall: async () => {
+        if (!await reserve(workspace, "theme_worker", pending.theme.theme_id)) throw new RegCompareError("agent_call_budget_exhausted", "The analysis model-call budget is exhausted.", 5);
+      },
+    });
     await recordArtifact(workspace, delegate.artifact);
     await finish(workspace, "theme_worker", pending.theme.theme_id, delegate.process.outcome);
     return { attempt, artifact: delegate.artifact, result: delegate.value, error: delegate.process.outcome === "ok" ? null : delegate.process.outcome };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = error instanceof RegCompareError ? error.code : "model_error";
     await appendOperationalLog(workspace, "error", "theme_worker", "delegate_failed", "Theme delegate failed before producing a durable result.", { theme_id: pending.theme.theme_id, error: message });
-    await finish(workspace, "theme_worker", pending.theme.theme_id, "failed");
+    await finish(workspace, "theme_worker", pending.theme.theme_id, message);
     return { attempt, artifact: null, result: null, error: message };
   }
 }
@@ -238,8 +263,14 @@ async function analyzePlan(workspace: Workspace, input: RunInput, plan: Approved
     packet: buildThemePacket({ theme_id: theme.theme_id, label: theme.label, description: theme.description, keywords: theme.keywords, seed_record_ids: theme.seed_record_ids }, documents),
     attempts: [],
   }));
+  let startQueue = Promise.resolve();
   let reservationQueue = Promise.resolve();
   let finishQueue = Promise.resolve();
+  const startSerialized = async (target: Workspace, role: "mapper" | "theme_worker", themeId: string | null): Promise<void> => {
+    const start = startQueue.then(() => startAgentCall(target, role, themeId));
+    startQueue = start.then(() => undefined, () => undefined);
+    return start;
+  };
   const reserveSerialized = async (target: Workspace, role: "mapper" | "theme_worker", themeId: string | null): Promise<boolean> => {
     const reservation = reservationQueue.then(() => reserveAgentCall(target, role, themeId));
     reservationQueue = reservation.then(() => undefined, () => undefined);
@@ -252,7 +283,7 @@ async function analyzePlan(workspace: Workspace, input: RunInput, plan: Approved
   };
   await mapWithConcurrency(pending, input.concurrency, async (theme) => {
     const attempt = await nextThemeAttempt(workspace, theme.theme.theme_id);
-    theme.attempts.push(await invokeTheme(workspace, input, theme, attempt, reserveSerialized, finishSerialized));
+    theme.attempts.push(await invokeTheme(workspace, input, theme, attempt, reserveSerialized, finishSerialized, startSerialized));
   });
   const documentsById = new Map(documents.map((document) => [document.document_id, document]));
   const completed: CompletedTheme[] = [];
@@ -263,8 +294,8 @@ async function analyzePlan(workspace: Workspace, input: RunInput, plan: Approved
   for (const theme of pending) {
     let current = theme.attempts[0] ?? { attempt: 0, artifact: null, result: null, error: "worker_not_started" };
     let audit = current.artifact ? auditThemeResult(input.profile, current.result, documentsById, current.artifact, theme.theme.theme_id, completed.flatMap((item) => item.audited.accepted)) : null;
-    if ((current.error || audit?.workerLevelFailure) && current.attempt < 2) {
-      const retry = await invokeTheme(workspace, input, theme, current.attempt + 1, reserveSerialized, finishSerialized);
+    if ((current.error || audit?.workerLevelFailure) && current.error !== "budget_exhausted" && current.attempt < 2) {
+      const retry = await invokeTheme(workspace, input, theme, current.attempt + 1, reserveSerialized, finishSerialized, startSerialized);
       theme.attempts.push(retry);
       current = retry;
       audit = retry.artifact ? auditThemeResult(input.profile, retry.result, documentsById, retry.artifact, theme.theme.theme_id, completed.flatMap((item) => item.audited.accepted)) : null;
@@ -272,7 +303,7 @@ async function analyzePlan(workspace: Workspace, input: RunInput, plan: Approved
     if (current.error || !audit || audit.workerLevelFailure) {
       exclusions.push({
         theme_id: theme.theme.theme_id,
-        reason_code: current.error === "call_budget_exhausted" ? "call_budget_exhausted" : "worker_retry_exhausted",
+        reason_code: current.error === "budget_exhausted" ? "call_budget_exhausted" : "worker_retry_exhausted",
         attempt_artifacts: theme.attempts.flatMap((attempt) => attempt.artifact ? [attempt.artifact] : []),
         description: current.error ?? audit?.reason ?? "The worker did not produce a defensible audited result.",
       });
@@ -371,7 +402,7 @@ async function runPlan(workspace: Workspace, input: RunInput, documents: Ingeste
     throw new RegCompareError("plan_rejected", "Reviewer rejected the analysis plan.", 5);
   }
   if (planReview.decision === "amended") {
-    if (plan.round >= 2 || (await getState(workspace)).used_agent_calls >= 2) throw new RegCompareError("plan_amendment_limit", "Only one semantic plan amendment is allowed per run.", 5);
+    if (plan.round >= 2) throw new RegCompareError("plan_amendment_limit", "Only one semantic plan amendment is allowed per run.", 5);
     await transitionState(workspace, "mapping", { active_review_stage: null });
     const revised = await createPlan(workspace, input, documents.map((document) => document.normalized), 2, planReview.amendment);
     await transitionState(workspace, "awaiting_plan_review", { active_plan_path: null, active_review_stage: "plan" });
@@ -392,7 +423,8 @@ async function continueApprovedPlan(workspace: Workspace, input: RunInput, docum
       throw new RegCompareError("partial_not_allowed", "One or more themes failed and --allow-partial was not specified.", 5);
     }
     await transitionState(workspace, "blocked_partial", { active_review_stage: "partial" });
-    const partialReview = await collectReview({ autoApprove: false, partial: true, round: plan.round });
+    const partialReview = await collectReview({ autoApprove: false, partial: true, findings: analysis.themes.flatMap((theme) => theme.findings), round: plan.round });
+    if (partialReview.decision === "confirmed_partial") ensureFinalReview(partialReview, analysis.themes.flatMap((theme) => theme.findings));
     await saveReview(workspace, partialReview);
     if (partialReview.decision !== "confirmed_partial") {
       await transitionState(workspace, "cancelled", { active_review_stage: null });
@@ -408,9 +440,192 @@ async function finalizeWithReview(workspace: Workspace, input: RunInput, documen
   const findingList = themes.flatMap((theme) => theme.findings);
   await transitionState(workspace, "awaiting_final_review", { active_review_stage: "final" });
   const review = await collectReview({ autoApprove: input.autoApprove, findings: findingList, round: plan.round });
-  await saveReview(workspace, review);
+  if (review.decision === "rejected") {
+    await saveReview(workspace, review);
+    await transitionState(workspace, "cancelled", { active_review_stage: null });
+    throw new RegCompareError("final_review_rejected", "Reviewer rejected publication.", 5);
+  }
   ensureFinalReview(review, findingList);
+  await saveReview(workspace, review);
   await finalize(workspace, plan, input, documents, themes, exclusions, review, mapperBodySampleRatio);
+}
+
+function conversationInput(workspace: Workspace, options: RunOptions): RunInput {
+  return { ...options, baseline: "", candidate: "", output: workspace.root, dryRun: false };
+}
+
+async function withConversationLock<T>(runDirectory: string, operation: (workspace: Workspace) => Promise<T>): Promise<T> {
+  const workspace = await assertWorkspace(runDirectory);
+  await acquireLock(workspace);
+  try {
+    await validateLedger(workspace);
+    return await operation(workspace);
+  } finally {
+    await releaseLock(workspace);
+  }
+}
+
+function assertConversationState(state: string, expected: string): void {
+  if (state !== expected) throw new RegCompareError("conversation_state_invalid", `Run must be ${expected}; it is ${state}.`, 5);
+}
+
+function conversationProgressPath(plan: ApprovedPlan): string {
+  return `audit/conversation-progress-${plan.round}.json`;
+}
+
+async function readConversationProgress(workspace: Workspace, plan: ApprovedPlan): Promise<ConversationProgress> {
+  return conversationProgressSchema.parse(await readJson(artifactPath(workspace, conversationProgressPath(plan))));
+}
+
+async function latestApprovedPlanReview(workspace: Workspace, plan: ApprovedPlan): Promise<void> {
+  const review = reviewRecordSchema.parse(await readJson(artifactPath(workspace, `reviews/plan-${plan.round}.json`)));
+  if (review.stage !== "plan" || review.decision !== "approved") throw new RegCompareError("plan_not_approved", "The latest plan has not been approved for analysis.", 5);
+}
+
+export async function startConversationRun(rawInput: RawRunInput): Promise<RunResult> {
+  const input = parseRunInput({ ...rawInput, autoApprove: false, dryRun: false });
+  await validateSourceInputs(input);
+  const documents = await Promise.all([
+    ingestDocument("baseline", input.baseline, { maxPages: input.maxSourcePages, maxChars: input.maxSourceChars }),
+    ingestDocument("candidate", input.candidate, { maxPages: input.maxSourcePages, maxChars: input.maxSourceChars }),
+  ]);
+  await assertDoctor();
+  const workspace = await createWorkspace(input.output, { profile: input.profile, options: runOptions(input), data_classification: input.dataClassification, model: assertExternalModelConfigured(), documents: documents.map((document) => document.ref), normalization_version: "canon-v1" });
+  await acquireLock(workspace);
+  try {
+    await transitionState(workspace, "ingesting");
+    for (const document of documents) {
+      await writeArtifact(workspace, document.ref.raw_artifact_path, document.source, true);
+      await writeArtifact(workspace, document.ref.normalized_artifact_path, document.normalized);
+    }
+    await writeArtifact(workspace, "sources/source-stats.json", sourceStats(documents));
+    await transitionState(workspace, "normalized");
+    await transitionState(workspace, "mapping");
+    return { run_directory: workspace.root, run_id: workspace.runId, state: "mapping", dry_run: false };
+  } catch (error) {
+    const state = await getState(workspace);
+    if (state.state !== "failed") await transitionState(workspace, "failed");
+    throw error;
+  } finally {
+    await releaseLock(workspace);
+  }
+}
+
+export async function createConversationPlan(runDirectory: string): Promise<ApprovedPlan> {
+  return withConversationLock(runDirectory, async (workspace) => {
+    const state = await getState(workspace);
+    assertConversationState(state.state, "mapping");
+    const manifest = await getManifest(workspace);
+    const input = conversationInput(workspace, manifest.options);
+    try {
+      const plan = await createPlan(workspace, input, (await resumeDocuments(workspace)).map((document) => document.normalized), 1);
+      await transitionState(workspace, "awaiting_plan_review", { active_plan_path: `planning/plan-${plan.round}.json`, active_review_stage: "plan" });
+      return plan;
+    } catch (error) {
+      await transitionState(workspace, "failed", { active_review_stage: null });
+      throw error;
+    }
+  });
+}
+
+export async function submitConversationPlan(runDirectory: string, decision: "approved" | "rejected" | "amended", amendment: string | null = null): Promise<{ decision: "approved" | "rejected" | "amended"; plan: ApprovedPlan | null }> {
+  return withConversationLock(runDirectory, async (workspace) => {
+    const state = await getState(workspace);
+    assertConversationState(state.state, "awaiting_plan_review");
+    const plan = await latestPlan(workspace);
+    const amendedText = amendment?.trim() || null;
+    if (decision === "amended" && !amendedText) throw new RegCompareError("plan_amendment_missing", "An amended plan requires an amendment instruction.", 5);
+    if (decision === "amended" && plan.round >= 2) throw new RegCompareError("plan_amendment_limit", "Only one semantic plan amendment is allowed per run.", 5);
+    const review = createReviewRecord("plan", plan.round, "interactive", decision, decision === "amended" ? amendedText : null, []);
+    await saveReview(workspace, review);
+    if (decision === "rejected") {
+      await transitionState(workspace, "cancelled", { active_review_stage: null });
+      return { decision, plan: null };
+    }
+    if (decision === "approved") return { decision, plan };
+    try {
+      const manifest = await getManifest(workspace);
+      const input = conversationInput(workspace, manifest.options);
+      await transitionState(workspace, "mapping", { active_review_stage: null });
+      const revised = await createPlan(workspace, input, (await resumeDocuments(workspace)).map((document) => document.normalized), 2, amendedText!);
+      await transitionState(workspace, "awaiting_plan_review", { active_plan_path: `planning/plan-${revised.round}.json`, active_review_stage: "plan" });
+      return { decision, plan: revised };
+    } catch (error) {
+      const current = await getState(workspace);
+      if (current.state !== "failed") await transitionState(workspace, "failed", { active_review_stage: null });
+      throw error;
+    }
+  });
+}
+
+export async function analyzeConversationPlan(runDirectory: string): Promise<ConversationProgress> {
+  return withConversationLock(runDirectory, async (workspace) => {
+    const state = await getState(workspace);
+    assertConversationState(state.state, "awaiting_plan_review");
+    const plan = await latestPlan(workspace);
+    await latestApprovedPlanReview(workspace, plan);
+    const manifest = await getManifest(workspace);
+    const input = conversationInput(workspace, manifest.options);
+    const documents = await resumeDocuments(workspace);
+    try {
+      await transitionState(workspace, "analyzing", { active_plan_path: `planning/plan-${plan.round}.json`, active_review_stage: null });
+      const analysis = await analyzePlan(workspace, input, plan, documents.map((document) => document.normalized));
+      await transitionState(workspace, "auditing");
+      const mapperPacket = await readJson<{ coverage: { body_sample_ratio: number } }>(artifactPath(workspace, `context/mapper/packet-${plan.round}.json`));
+      const progress = conversationProgressSchema.parse({ schema_version: "1.0", plan_round: plan.round, themes: analysis.themes, excluded_themes: analysis.exclusions, mapper_body_sample_ratio: mapperPacket.coverage.body_sample_ratio });
+      await writeArtifact(workspace, conversationProgressPath(plan), progress);
+      await writeArtifact(workspace, "audit/coverage-1.json", coverageFor(plan, analysis.themes, analysis.exclusions, progress.mapper_body_sample_ratio));
+      if (analysis.exclusions.length) {
+        if (!input.allowPartial) {
+          await transitionState(workspace, "failed");
+          throw new RegCompareError("partial_not_allowed", "One or more themes failed and partial finalization was not enabled.", 5);
+        }
+        await transitionState(workspace, "blocked_partial", { active_review_stage: "partial" });
+      } else {
+        await transitionState(workspace, "awaiting_final_review", { active_review_stage: "final" });
+      }
+      return progress;
+    } catch (error) {
+      const current = await getState(workspace);
+      if (current.state !== "blocked_partial" && current.state !== "failed") await transitionState(workspace, "failed", { active_review_stage: null });
+      throw error;
+    }
+  });
+}
+
+export async function finalizeConversationRun(runDirectory: string, decision: "approved" | "rejected" | "confirmed_partial", dispositions: Analysis["final_review"]["dispositions"] = []): Promise<RunResult> {
+  return withConversationLock(runDirectory, async (workspace) => {
+    const state = await getState(workspace);
+    if (!(["awaiting_final_review", "blocked_partial"] as string[]).includes(state.state)) throw new RegCompareError("conversation_state_invalid", `Run cannot be finalized from ${state.state}.`, 5);
+    const plan = await latestPlan(workspace);
+    const progress = await readConversationProgress(workspace, plan);
+    const partial = state.state === "blocked_partial";
+    const validDecision = partial ? decision === "confirmed_partial" || decision === "rejected" : decision === "approved" || decision === "rejected";
+    if (!validDecision) throw new RegCompareError("review_decision_invalid", "The review decision is not valid for the active finalization gate.", 5);
+    const findings = progress.themes.flatMap((theme) => theme.findings);
+    const review = createReviewRecord(partial ? "partial" : "final", plan.round, "interactive", decision, null, dispositions);
+    if (decision !== "rejected") ensureFinalReview(review, findings);
+    await saveReview(workspace, review);
+    if (decision === "rejected") {
+      await transitionState(workspace, "cancelled", { active_review_stage: null });
+      return { run_directory: workspace.root, run_id: workspace.runId, state: "cancelled", dry_run: false };
+    }
+    try {
+      const documents = await resumeDocuments(workspace);
+      await finalize(workspace, plan, conversationInput(workspace, (await getManifest(workspace)).options), documents, progress.themes, progress.excluded_themes, review, progress.mapper_body_sample_ratio);
+      return { run_directory: workspace.root, run_id: workspace.runId, state: "finalized", dry_run: false };
+    } catch (error) {
+      const current = await getState(workspace);
+      if (current.state !== "failed") await transitionState(workspace, "failed", { active_review_stage: null });
+      throw error;
+    }
+  });
+}
+
+export async function getConversationProgress(runDirectory: string): Promise<ConversationProgress> {
+  const workspace = await assertWorkspace(runDirectory);
+  await validateLedger(workspace);
+  return readConversationProgress(workspace, await latestPlan(workspace));
 }
 
 export async function runComparison(rawInput: RunInput | Parameters<typeof parseRunInput>[0]): Promise<RunResult> {
@@ -426,7 +641,7 @@ export async function runComparison(rawInput: RunInput | Parameters<typeof parse
     return { run_directory: input.output, run_id: null, state: "dry_run", dry_run: true, plan: { effective_theme_cap: Math.min(input.maxThemes, input.agentCallBudget - 1), remaining_agent_calls: input.agentCallBudget - 1, source_stats: sourceStats(documents) } };
   }
   await assertDoctor();
-  const workspace = await createWorkspace(input.output, { profile: input.profile, options: runOptions(input), data_classification: input.dataClassification, documents: documents.map((document) => document.ref), normalization_version: "canon-v1" });
+  const workspace = await createWorkspace(input.output, { profile: input.profile, options: runOptions(input), data_classification: input.dataClassification, model: assertExternalModelConfigured(), documents: documents.map((document) => document.ref), normalization_version: "canon-v1" });
   await acquireLock(workspace);
   const removeInterruptHandler = installInterruptHandler(workspace);
   try {
@@ -500,7 +715,8 @@ async function resumePartial(workspace: Workspace, input: RunInput, documents: I
   }));
   if (!exclusions.length) throw new RegCompareError("resume_partial_invalid", "Partial run has no excluded themes.", 6);
   await transitionState(workspace, "awaiting_partial_review", { active_review_stage: "partial" });
-  const review = await collectReview({ autoApprove: false, partial: true, round: plan.round });
+  const review = await collectReview({ autoApprove: false, partial: true, findings: themes.flatMap((theme) => theme.findings), round: plan.round });
+  if (review.decision === "confirmed_partial") ensureFinalReview(review, themes.flatMap((theme) => theme.findings));
   await saveReview(workspace, review);
   if (review.decision !== "confirmed_partial") {
     await transitionState(workspace, "cancelled", { active_review_stage: null });

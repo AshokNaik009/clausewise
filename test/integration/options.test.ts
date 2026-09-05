@@ -11,7 +11,7 @@ describe("run option controls", () => {
 
   it("rejects unsafe approval and classification combinations", () => {
     expect(() => parseRunInput({ ...base, allowPartial: true, autoApprove: true })).toThrow(/cannot be combined/u);
-    expect(() => parseRunInput({ ...base, dataClassification: "internal" })).toThrow(/confirm-external-agent-access/u);
+    expect(() => parseRunInput({ ...base, dataClassification: "internal" })).toThrow(/confirm-external-model-access/u);
     expect(() => parseRunInput({ ...base, maxThemes: "7" })).toThrow(/1 to 6/u);
   });
 });

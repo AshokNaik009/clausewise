@@ -9,6 +9,7 @@ import { fetchFixture, verifyFixtures } from "./fixtures.js";
 import { runComparison, resumeComparison } from "./orchestrator.js";
 import { doctor } from "./preflight.js";
 import { invokeQuickJsBridge } from "./quickjs.js";
+import { startShell } from "./shell.js";
 import { assertWorkspace, appendEvent, releaseLock } from "./workspace.js";
 import { inspectRun, validateRun } from "./validation.js";
 
@@ -18,7 +19,7 @@ let renderedBanner = false;
 function banner(): void {
   if (renderedBanner) return;
   renderedBanner = true;
-  process.stdout.write(`${figlet.textSync("DEEPAGENT HARNESS", { font: "Standard", horizontalLayout: "default" })}\nRegulatory Document Comparison\n\n`);
+  process.stdout.write(`${figlet.textSync("CLAUSEWISE", { font: "Standard", horizontalLayout: "default" })}\nRegulatory Document Comparison\n\n`);
 }
 
 function printJson(value: unknown): void {
@@ -43,11 +44,16 @@ function fail(error: unknown): never {
 
 const program = new Command();
 program.name("reg-compare").description("DEEPAGENT HARNESS regulatory document comparison").version("0.1.0");
+program.action(async () => {
+  banner();
+  await startShell();
+});
 
 program.command("doctor")
   .option("--json", "emit exactly one JSON object")
-  .action(async (options: { json?: boolean }) => {
-    const result = await doctor();
+  .option("--network", "test the configured model endpoint")
+  .action(async (options: { json?: boolean; network?: boolean }) => {
+    const result = await doctor(options.network === undefined ? {} : { network: options.network });
     if (options.json) printJson(result);
     else {
       show(false);
@@ -65,21 +71,21 @@ program.command("run")
   .option("--output <directory>", "new run directory")
   .option("--max-themes <count>", "maximum themes, 1-6", "6")
   .option("--concurrency <count>", "concurrent workers, 1-3", "2")
-  .option("--agent-call-budget <count>", "maximum Devin calls, 2-14", "9")
+  .option("--agent-call-budget <count>", "maximum external analysis model calls, 2-14", "9")
   .option("--agent-timeout-seconds <seconds>", "worker timeout, 30-900", "300")
   .option("--max-source-pages <count>", "maximum PDF pages, 1-350", "350")
   .option("--max-source-chars <count>", "maximum normalized characters per source, 10000-2500000", "2500000")
   .option("--allow-partial", "allow an interactive partial finalization")
   .option("--auto-approve", "record automated review approvals")
-  .option("--confirm-external-agent-access", "confirm external Devin service access for internal/confidential data")
+  .option("--confirm-external-model-access", "confirm external model access for internal/confidential data")
   .option("--confirm-encrypted-workspace", "confirm confidential output uses an approved encrypted workspace")
   .option("--retention-until <timestamp>", "confidential data retention timestamp, maximum 30 days")
-  .option("--dry-run", "normalize and plan without Devin calls or a durable run directory")
+  .option("--dry-run", "normalize sources and calculate capacity without model calls or a durable run directory")
   .action(async (options) => {
     show(false);
     const result = await runComparison(options);
     process.stdout.write(`${result.dry_run ? "Dry-run validated" : "Run finalized"}: ${result.run_directory}\n`);
-    if (result.plan) process.stdout.write(`Effective theme cap: ${result.plan.effective_theme_cap}; remaining calls after mapper: ${result.plan.remaining_agent_calls}\n`);
+    if (result.plan) process.stdout.write(`Effective theme cap: ${result.plan.effective_theme_cap}; remaining analysis model calls after mapper: ${result.plan.remaining_agent_calls}\n`);
   });
 
 program.command("resume")

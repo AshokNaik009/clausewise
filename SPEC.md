@@ -1,10 +1,10 @@
 # Regulatory Document Comparison Harness
 ## Product and Technical Specification
 
-**Status:** Approved build specification  
-**Version:** 0.2  
-**Runtime:** TypeScript on Node.js 22 and npm  
-**Primary reasoning engine:** Devin CLI in non-interactive `-p` mode  
+**Status:** Implemented architecture specification
+**Version:** 0.3
+**Runtime:** TypeScript on Node.js 22 and npm
+**Primary reasoning engine:** In-process DeepAgents workers using ChatOpenAI against OpenRouter-compatible endpoints
 **Initial regulatory corpus:** English-language UAE financial-services AML/CFT sources
 
 ---
@@ -36,7 +36,7 @@ The design intentionally demonstrates four Deep Agents capabilities under audita
   - `policy-gap`
 - `analysis.json` and `report.md` after reviewer approval.
 - Real public UAE fixture metadata and pinned source snapshots where redistribution is permitted.
-- Devin-driven semantic mapping and theme comparison, with deterministic TypeScript validation and report rendering.
+- In-process DeepAgents semantic mapping and theme comparison through a pinned OpenRouter-compatible model, with deterministic TypeScript validation and report rendering.
 
 ### 2.2 Out of scope
 
@@ -64,37 +64,39 @@ For `policy-gap`, the exact sentence below **must appear immediately after the r
 
 ## 4. Operational limits and budgets
 
-Limits are enforced before an agent worker is started. The defaults are intentionally conservative and must be shown in `reg-compare run --help`.
+Limits are application-enforced. The defaults are intentionally conservative and `reg-compare run --help` exposes the user-selectable values.
 
 | Control | Default | Allowed range | Failure behavior |
 | --- | ---:| ---:| --- |
 | `--max-themes` | 6 | 1–6 | Reject an out-of-range value. |
 | `--concurrency` | 2 | 1–3 | Reject an out-of-range value. |
-| `--agent-call-budget` | 9 | 2–14 | Stop scheduling when exhausted; do not silently exceed it. |
-| `--agent-timeout-seconds` | 300 | 30–900 | Kill the worker, record timeout, and apply retry policy. |
+| `--agent-call-budget` | 9 | 2–14 | Cap external analysis **provider requests**; do not silently exceed it. |
+| Shell model calls | 100/session | fixed | Stop the conversational shell when its in-memory session cap is reached. This is not charged to a run. |
+| `--agent-timeout-seconds` | 300 | 30–900 | Mark the worker attempt as timed out and apply retry policy. |
 | `--max-source-pages` | 350 | 1–350 | Reject a larger PDF; never silently truncate pages. |
 | `--max-source-chars` | 2,500,000/document | 10,000–2,500,000 | Reject a larger normalized document; never silently truncate text. |
-| Mapper context | 160,000 canonical characters total | fixed v0.2 | Create a bounded mapping packet and report its coverage. |
-| Theme context | 100,000 canonical characters total | fixed v0.2 | Create a bounded per-theme packet and report its coverage. |
-| Theme context records | 80 records total | fixed v0.2 | Retrieval stops at the first applicable limit. |
-| Worker stdout | 1 MiB | fixed v0.2 | Kill/mark malformed if the cap is exceeded. |
-| Worker stderr | 1 MiB | fixed v0.2 | Truncate, flag `stderr_truncated`, and retain the captured prefix. |
-| QuickJS source | 16 KiB | fixed v0.2 | Reject the request. |
-| QuickJS RPC message | 128 KiB | fixed v0.2 | Reject the request. |
-| QuickJS read result | 1 MiB/execution | fixed v0.2 | Reject the request. |
-| QuickJS wall-clock time | 1,000 ms | fixed v0.2 | Interrupt the runtime and log `timeout`. |
-| QuickJS memory | 32 MiB | fixed v0.2 | Interrupt/dispose the runtime and log `memory_limit`. |
-| QuickJS stack | 1 MiB | fixed v0.2 | Interrupt/dispose the runtime and log `stack_limit`. |
+| Mapper context | 160,000 canonical characters total | fixed | Create a bounded mapping packet and report its coverage. |
+| Theme context | 100,000 canonical characters total | fixed | Create a bounded per-theme packet and report its coverage. |
+| Theme context records | 80 records total | fixed | Retrieval stops at the first applicable limit. |
+| QuickJS source | 16 KiB | fixed | Reject the request. |
+| QuickJS RPC message | 128 KiB | fixed | Reject the request. |
+| QuickJS read result | 1 MiB/execution | fixed | Reject the request. |
+| QuickJS wall-clock time | 1,000 ms | fixed | Interrupt the runtime and log `timeout`. |
+| QuickJS memory | 32 MiB | fixed | Interrupt/dispose the runtime and log `memory_limit`. |
+| QuickJS stack | 1 MiB | fixed | Interrupt/dispose the runtime and log `stack_limit`. |
 
-The agent-call budget includes mapper attempts, theme attempts, corrective retries, and semantic plan-remapping attempts. It is not a cost estimate; Devin CLI does not expose a stable token-cost contract to this application. The CLI reports the number of calls used, calls remaining, and the maximum possible remaining calls at every review gate.
+`--agent-call-budget` counts actual chat-model requests, including mapper/worker tool loops and retry attempts—not delegate invocations. A LangChain callback calls `reserveModelCall()` immediately before every provider request. The atomic reservation writes a `model_call_started` event containing the new state projection. Ledger validation requires contiguous call numbers, valid mapper/theme association, and equality between the immutable reservations, `used_agent_calls`, `remaining_agent_calls`, and the configured budget.
+
+The shell applies `LIMITS.maxShellModelCalls = 100` independently in memory. Its requests coordinate a conversation rather than analyze a run, so they are intentionally outside the analysis budget and have no cross-process durability.
 
 ---
 
 ## 5. Command-line interface
 
 ```text
+reg-compare                         # conversational shell
 reg-compare --version
-reg-compare doctor [--json]
+reg-compare doctor [--json] [--network]
 reg-compare run [options]
 reg-compare resume --run <directory> [--auto-approve]
 reg-compare validate --run <directory> [--json]
@@ -103,6 +105,10 @@ reg-compare fixtures verify [--json]
 reg-compare fixtures fetch --id <fixture-id> --confirm-public-download
 reg-compare purge --run <directory> --confirm-purge
 ```
+
+With no subcommand, `reg-compare` starts a conversational DeepAgents shell. The shell uses only `inspect_sources`, `start_run`, `create_plan`, `submit_plan`, `analyze_themes`, `finalize_run`, `inspect_run`, `validate_run`, and `read_findings`. The required forward flow is source inspection, run start, plan creation, plan review, analysis, and final review. `submit_plan` and `finalize_run` are graph-level human interrupts; shell approval input is converted to an `edit` decision so the harness tool writes the authoritative `ReviewRecord`.
+
+The shell uses a fresh LangGraph `MemorySaver` thread for the current terminal session only. It is not cross-process checkpointing. Follow-up answers obtain run state and audited findings through harness tools and the workspace ledger.
 
 ### 5.1 `run`
 
@@ -127,30 +133,30 @@ Optional arguments:
 - `--output <new-directory>`; default: `runs/<UTC timestamp>-<profile>/`
 - `--max-themes <1..6>`
 - `--concurrency <1..3>`
-- `--agent-call-budget <2..14>`
+- `--agent-call-budget <2..14>`; external analysis provider requests
 - `--agent-timeout-seconds <30..900>`
 - `--max-source-pages <1..350>`
 - `--max-source-chars <10000..2500000>`
 - `--allow-partial`
 - `--auto-approve`
-- `--confirm-external-agent-access`; required for `internal` and `confidential`
+- `--confirm-external-model-access`; required for `internal` and `confidential`
 - `--confirm-encrypted-workspace`; required for `confidential`
 - `--retention-until <ISO-8601 timestamp>`; required for `confidential`, maximum 30 days in the future
-- `--dry-run`; validates inputs, normalizes, calculates context/call budgets, and prints the execution plan without calling Devin or creating a durable run directory
+- `--dry-run`; validates inputs, normalizes, calculates capacity, and prints a plan envelope without model calls or a durable run directory
 
 Rules:
 
 - Source files must be distinct regular files with supported extensions.
-- The output directory must not exist. `resume` is the only command that accepts an existing run directory.
-- `--auto-approve --allow-partial` is invalid. A partial finalization always needs an interactive, explicit human confirmation.
-- An approved plan cannot select more themes than both `--max-themes` and the remaining call budget can support.
-- `doctor`-equivalent preflight runs before any Devin process is started.
+- The output directory must not exist. `resume` is the only scripted command that accepts an existing run directory.
+- `--auto-approve --allow-partial` is invalid. A partial finalization always needs an interactive, explicit human confirmation and critical/high dispositions for published findings.
+- An approved plan cannot select more themes than both `--max-themes` and the remaining analysis-call budget can support.
+- External model configuration is required immediately before a real model request, not for local validation or `doctor`.
 
 ### 5.2 `doctor`
 
-`doctor` is non-destructive. It verifies Node 22, npm, the QuickJS runtime, the discoverable Devin CLI version, authenticated Devin access, supported Devin `-p`/sandbox flags, the required worker-policy configuration, and effective sandbox availability. It prints the active limits and exits non-zero when any required capability is absent.
+`doctor` is non-destructive and local by default. It requires Node 22, npm, and QuickJS, then reports API-key and provider-routing configuration as informational checks. It prints active limits and exits non-zero only when a required local capability is absent.
 
-`doctor` validates policy configuration; it does not claim to prove the availability or security of an external Devin transport service.
+`doctor --network` explicitly requests a reachability check against the configured model endpoint. It requires a key and provider route for that check. Ordinary tests and offline use never perform this request.
 
 ### 5.3 `resume`
 
@@ -162,12 +168,12 @@ Rules:
 | ---:| --- |
 | 0 | Requested operation completed successfully; a `run` is complete and finalized. |
 | 1 | Invalid CLI usage or input argument. |
-| 2 | Preflight, policy, authentication, sandbox, classification, or source-ingestion failure. |
+| 2 | Required local preflight, model configuration, classification, workspace-permission, or source-ingestion failure. |
 | 3 | Schema, evidence, report-consistency, or run-ledger validation failure. |
 | 4 | Run finalized as an explicitly approved **partial** result. |
 | 5 | A worker, mapper, budget, or required review blocked completion. |
 | 6 | Run is corrupt or cannot be resumed safely. |
-| 7 | Devin-driven sanity test failed. |
+| 7 | Local sanity or fixture-verification test failed. |
 | 130 | Interrupted by `SIGINT`. |
 | 143 | Interrupted by `SIGTERM`. |
 
@@ -200,8 +206,8 @@ The strict Arabic threshold deliberately rejects mixed Arabic/English material r
 ### 6.3 Classification and storage
 
 - `public` uses the normal workspace layout.
-- `internal` requires `--confirm-external-agent-access`.
-- `confidential` requires both `--confirm-external-agent-access` and `--confirm-encrypted-workspace`, plus a `--retention-until` no more than 30 days ahead.
+- `internal` requires `--confirm-external-model-access`.
+- `confidential` requires both `--confirm-external-model-access` and `--confirm-encrypted-workspace`, plus a `--retention-until` no more than 30 days ahead.
 
 For every run, the coordinator sets process `umask` to `0077`, creates directories with mode `0700`, and creates files with mode `0600`. It verifies these modes after creation and fails closed if the platform cannot provide them.
 
@@ -307,7 +313,7 @@ All schemas are implemented as discriminated TypeScript/Zod schemas. `validate` 
 
 ### 8.2 Immutable manifest, events, state projection, and logs
 
-Every JSON artifact has `schema_version: "1.0"` and a `created_at` timestamp. `manifest.json` is immutable:
+The manifest, plans, review records, worker attempts/results, analysis envelope, and conversation-progress artifacts are Zod-validated against `schema_version: "1.0"` before they are used or published. `manifest.json` is immutable and includes the complete run options, exactly one `baseline` and one `candidate` `DocumentRef`, classification, and model provenance:
 
 ```json
 {
@@ -315,29 +321,17 @@ Every JSON artifact has `schema_version: "1.0"` and a `created_at` timestamp. `m
   "run_id": "uuid",
   "created_at": "ISO-8601",
   "profile": "consultation-impact",
-  "options": { "max_themes": 6, "concurrency": 2, "agent_call_budget": 9 },
+  "options": { "profile": "consultation-impact", "dataClassification": "public", "maxThemes": 6, "concurrency": 2, "agentCallBudget": 9 },
   "data_classification": "public | internal | confidential",
+  "model": { "model": "deepseek/deepseek-chat", "base_url": "https://openrouter.ai/api/v1", "temperature": 0, "provider_order": ["approved-provider"], "allow_fallbacks": false, "data_collection": "deny" },
   "documents": ["DocumentRef", "DocumentRef"],
   "normalization_version": "canon-v1"
 }
 ```
 
-Every immutable `events/<sequence>-<type>.json` entry is an `Event`:
+Every immutable `events/<sequence>-<type>.json` entry is hash chained. Event types are `state_transition`, `artifact_created`, `worker_started`, `worker_finished`, `model_call_started`, `review_recorded`, `interrupted`, and `purge_intent`. A `model_call_started` payload includes `{ role, theme_id, model_call_number, state }`, where `state` is the exact post-reservation projection.
 
-```json
-{
-  "schema_version": "1.0",
-  "run_id": "uuid",
-  "sequence": 12,
-  "type": "state_transition | artifact_created | worker_started | worker_finished | review_recorded | interrupted",
-  "timestamp": "ISO-8601",
-  "actor": "coordinator | reviewer | worker",
-  "payload": {},
-  "previous_event_sha256": "hex digest | null"
-}
-```
-
-`run-state.json` is the coordinator-only atomic projection `{ run_id, state, updated_at, active_plan_path, active_review_stage, used_agent_calls, remaining_agent_calls, worker_statuses, final_artifact_paths, last_event_sequence }`. It is reconstructed from `events/` during validation.
+`run-state.json` is the coordinator-only atomic projection `{ run_id, state, updated_at, active_plan_path, active_review_stage, used_agent_calls, remaining_agent_calls, worker_statuses, final_artifact_paths, last_event_sequence }`. It is reconstructed from state-transition and model-call projection events during validation. The ledger, not LangGraph conversation memory, is the source of truth for run status and cross-process resume.
 
 `logs/events.ndjson` is a byte-for-byte NDJSON mirror of immutable event payloads for streaming readers. `logs/orchestrator.ndjson` is non-authoritative operational telemetry with `{ timestamp, level, stage, event, message, fields }`; it must not contain source text, full prompts, or raw worker stdout.
 
@@ -386,7 +380,7 @@ The coordinator validates every seed record ID, de-duplicates proposals, and ass
 }
 ```
 
-Only a plan with a matching approved `ReviewRecord` may become `active_plan_path` in `run-state.json`.
+`active_plan_path` identifies the current proposed plan while awaiting review. `analyze_themes` requires a matching durable approved `ReviewRecord` for that exact plan round; the plan reference alone never authorizes analysis.
 
 ### 8.4 Worker, citation, theme, and finding schemas
 
@@ -429,6 +423,8 @@ The coordinator creates `ThemeResult` after audit:
   "coverage": { "included_records": 38, "candidate_records": 71, "context_truncated": false }
 }
 ```
+
+Every invocation also creates a Zod-validated worker-attempt artifact in `planning/mapper-attempt-<n>.json` or `workers/thm-<NNN>/attempt-<n>.json`: `{ schema_version, role, theme_id, command: "deepagents/openrouter", timestamps, exit_status, signal, stderr_truncated, stderr, stdout, outcome }`. A mapper attempt must have no theme ID; a theme worker must have one. Successful attempts have `exit_status: 0`; failed attempts carry a typed outcome rather than raw exception text.
 
 Finding IDs are assigned only after audit in deterministic plan/theme/worker-result order as `F-0001`, `F-0002`, and so on. Their uniqueness scope is one `run_id`.
 
@@ -480,6 +476,8 @@ The final review rejects a finalization when a critical/high finding lacks one o
 
 `coverage-<round>.json` is `{ ingestion_page_ratio, mapper_heading_ratio, mapper_body_sample_ratio, theme_outcome_ratio, verified_finding_ratio, fixture_required_concept_ratio, per_theme }`.
 
+`conversation-progress-<round>.json` is `{ schema_version, plan_round, themes, excluded_themes, mapper_body_sample_ratio }`. It is immutable and Zod-validated before the final-review gate uses it.
+
 `quickjs/<execution-id>.json` is `{ execution_id, timestamp, caller_role, theme_id, capability_hash, allowed_reads, allowed_writes, script_sha256, script, duration_ms, result, error, resource_outcome, written_artifacts }`.
 
 ---
@@ -492,8 +490,8 @@ A run is an **append-only evidence ledger plus one mutable coordinator-owned sta
 <run-directory>/
 ├── manifest.json                         # write once
 ├── run-state.json                        # mutable atomic projection; coordinator only
-├── lock                                  # held only while a run/resume is active
-├── events/000001-run-created.json        # immutable ordered event ledger
+├── lock                                  # held only during one staged coordinator operation
+├── events/000001-state_transition.json   # immutable ordered event ledger
 ├── logs/
 │   ├── orchestrator.ndjson                # operational logs; not authoritative state
 │   └── events.ndjson                      # event stream mirror; same payload as events/
@@ -503,27 +501,27 @@ A run is an **append-only evidence ledger plus one mutable coordinator-owned sta
 ├── reviews/{plan-<round>,final-<round>,partial-<round>}.json
 ├── workers/thm-001/{attempt-<n>-*}
 ├── quickjs/<execution-id>.json
-├── audit/{citation-audit,rejected-findings,coverage}-<round>.json
-├── drafts/draft-analysis-<round>.json
+├── audit/{citation-audit,rejected-findings,coverage,conversation-progress}-<round>.json
+├── drafts/                                # reserved for future coordinator-only drafts
 ├── analysis.json                          # write once, after finalization
 └── report.md                              # write once, after finalization
 ```
 
-`manifest.json` is written once at creation and contains immutable options, source hashes, classification declarations, and schema versions. It does not hold mutable status.
+`manifest.json` is written once at creation and contains immutable options, source hashes, classification declarations and consent, model provenance, and schema versions. It does not hold mutable status. An older manifest that lacks required provenance is rejected as incompatible rather than resumed under unstated routing controls.
 
-`run-state.json` is the only mutable artifact. It is written atomically by the coordinator after appending an event and contains the current state, active plan reference, used/remaining call budget, worker status table, active review gate, and final artifact references. `inspect` reads this projection. `validate` reconstructs expected state from the immutable event ledger and reports `corrupt` if it disagrees with `run-state.json`.
+`run-state.json` is the only mutable artifact. The coordinator writes it atomically after appending an event. It contains the current state, active plan reference, used/remaining provider-call budget, worker status table, active review gate, and final artifact references. `inspect` reads this projection. `validate` reconstructs expected state from the immutable event ledger, verifies the NDJSON event mirror, validates the manifest, worker attempts, plans, review records, theme results, and conversation-progress records, and reports incompatibility or corruption when they disagree.
 
-`drafts/draft-analysis-<round>.json` is immutable; a new draft gets a new round number. `analysis.json` and `report.md` are created exactly once when state becomes `finalized`.
+`analysis.json` and `report.md` are created exactly once when state becomes `finalized`. The shell's `MemorySaver` checkpoint exists only during its interactive session; it is neither stored in the workspace nor accepted as resume authority.
 
 ### 9.1 State machine
 
 ```text
 created -> ingesting -> normalized -> mapping -> awaiting_plan_review
-awaiting_plan_review -> mapping                 (one approved semantic amendment round only)
+awaiting_plan_review -> mapping                 (one semantic amendment round only)
 awaiting_plan_review -> analyzing -> auditing -> awaiting_final_review -> finalized
-any non-final state -> interrupted
-worker failure -> retrying | blocked_partial | failed
-blocked_partial -> awaiting_partial_review -> finalized
+analyzing/auditing -> blocked_partial -> finalized  (explicit partial confirmation)
+blocked_partial -> awaiting_partial_review -> finalized  (batch resume compatibility)
+any non-final state -> interrupted | failed
 awaiting_*_review -> cancelled                  (reviewer rejection)
 ```
 
@@ -553,7 +551,7 @@ The final envelope has structured exclusions:
 
 ### 9.2 Interrupt handling
 
-On `SIGINT` or `SIGTERM`, the coordinator stops scheduling work, terminates active child processes, appends an `interrupted` event, atomically projects `run-state.json`, releases the lock, and exits 130 or 143. Accepted artifacts remain valid. `resume` performs ledger validation and re-enters the last safe state; it does not discard completed mapper/theme/audit work or require re-review of an already approved plan.
+For scripted batch work, `SIGINT` or `SIGTERM` stops scheduling work, appends an `interrupted` event, atomically projects `run-state.json`, releases the lock, and exits 130 or 143. There are no delegate subprocesses to terminate. In the conversational shell, `SIGINT` aborts only the active graph invocation; the process remains available for the next user turn and durable run state remains ledger-controlled. Accepted artifacts remain valid. `resume` first performs ledger validation and re-enters a supported safe state without discarding completed artifacts or bypassing an approved-plan gate.
 
 ---
 
@@ -588,39 +586,36 @@ If fewer than four relevant records exist for either source, the worker receives
 
 ### 10.3 Enforced view
 
-The runner creates a disposable worker scratch directory and a worker-specific Devin policy. The policy denies direct reads of raw sources, complete normalized sources, planning artifacts outside the active plan, other workers, and the durable run root. The only source content exposed to the worker is its materialized context packet copied into the scratch input view.
+The coordinator creates a disposable worker scratch directory for every delegate invocation. The worker uses DeepAgents `FilesystemBackend` rooted at that scratch directory, receives read permission only for `/input/**`, and has an explicit deny rule for every other read/write operation. Its materialized `input/packet.json` is the only source content it can read. Theme workers additionally receive the brokered `execute_quickjs` tool; they receive no shell, process, network, durable-workspace, or unrestricted source capability.
 
-This policy is verified by `doctor` and integration tests against the installed Devin CLI version. The context cap is both a performance control and an application-enforced worker-input contract; it must not be represented as an OS-wide confidentiality boundary.
+The coordinating shell uses DeepAgents `StateBackend`, not a host-filesystem backend. Its profile removes built-in filesystem and task tools and its deny rule covers `/**` as defense in depth; its only durable effect is through schema-validated harness tools. `inspect_sources` returns local document metadata only and exposes no preview parameter, preventing raw-source text from entering the shell's context.
+
+These are application-level capability boundaries, not a claim of an OS-wide confidentiality boundary. Unit tests use a fake tool-calling model to prove the deny rule prevents a built-in `read_file` call before the state backend is consulted.
 
 ---
 
 ## 11. Workflow, coverage, and retry semantics
 
-### 11.1 Mapping and plan review
+### 11.1 Staged mapping and plan review
 
-1. Ingest and normalize both documents.
-2. Build the mapper packet and launch one mapper attempt.
-3. Validate the mapper proposal and derive a bounded plan.
-4. Present the plan, source/sample coverage, effective theme cap, call budget, and exclusions at the terminal gate.
-5. The reviewer chooses `approve`, `reject`, or `amend <free text>`.
+1. `start_run` ingests and normalizes both selected local documents while holding the workspace lock, then releases it in `mapping` state.
+2. `create_plan` reacquires the lock, builds the mapper packet, invokes the mapper, validates its proposal, writes its artifacts, derives the bounded plan, and releases the lock in `awaiting_plan_review`.
+3. DeepAgents interrupts `submit_plan`; the shell displays the actual plan and transforms the reviewer choice into a durable interactive `ReviewRecord`.
+4. `approved` leaves the run ready for analysis. `rejected` records cancellation. `amended` records the amendment, creates exactly one second mapper round, and returns to `awaiting_plan_review` for approval of the newly derived plan.
 
-There are at most **two mapper invocations per run**. The two-call budget is shared:
+There is one technical corrective mapper retry for the original mapper round, subject to remaining provider budget. A semantic amendment is limited to one round. Any mapper failure after durable stage work records a valid failure state; no hidden remediation request is made.
 
-- A technical mapper failure gets one corrective retry if no semantic amendment has consumed the second call.
-- A first approved-plan amendment invokes one mapper revision and consumes the second call.
-- A second semantic amendment is rejected as `plan_amendment_limit`; the reviewer may reject/cancel and start a new run.
-- If the initial mapper attempt and its corrective retry fail, the run becomes `failed` before theme work starts.
-- If a mapper revision after an amendment fails, the run becomes `failed`; no hidden third mapper call is allowed.
+### 11.2 Theme workers and progress
 
-### 11.2 Theme workers
+`analyze_themes` may run only from `awaiting_plan_review` with a matching durable approved plan review. It holds the workspace lock while workers execute, then writes `audit/conversation-progress-<round>.json`, coverage, citation-audit, rejection, worker-attempt, and theme-result artifacts. It releases the lock in `awaiting_final_review`, `blocked_partial`, or `failed`.
 
-Approved themes run with the configured concurrency. The worker writes no durable state and returns exactly one `ThemeWorkerResult` JSON object on stdout. The runner captures stdout/stderr with the limits in section 4 and records prompt, command metadata, exit status, and timestamps.
+Approved themes run with configured concurrency. Each DeepAgents worker has structured Zod output (`MapperProposal` or `ThemeWorkerResult`) and an attempt artifact with one outcome: `ok`, `model_error`, `schema_invalid`, `timeout`, or `budget_exhausted`. The attempt record intentionally stores a bounded result/outcome rather than raw exception text. Every model request, including a worker tool-loop iteration, consumes the callback-backed budget reservation described in section 4.
 
 ### 11.3 Audit, rejection, and retry
 
 The audit distinguishes worker-level and finding-level failure:
 
-- **Worker-level failure:** timeout, non-zero exit, stdout cap exceeded, missing/invalid JSON, schema failure, unsafe output, or no publishable outcome after audit. It triggers one corrective retry, subject to the global call budget.
+- **Worker-level failure:** model error, timeout, invalid structured response, call-budget exhaustion, or no publishable outcome after audit. It may receive one corrective retry subject to the global provider-request budget.
 - **Finding-level rejection:** a structurally valid worker result includes one or more invalid citation claims. The auditor rejects only those findings, writes them to `rejected-findings`, and accepts independently valid findings from the same worker result.
 - **Escalation:** if every candidate finding from a worker result is rejected, or its remaining accepted findings cannot satisfy the theme’s required outcome/evidence coverage, the theme becomes a worker-level failure and is retried once.
 
@@ -655,45 +650,35 @@ A fixture expectation manifest must state a numeric `min_published_findings` (at
 
 ### 11.6 Partial handling
 
-If retry cannot run or fails because of worker failure, call-budget exhaustion, or reviewer exclusion, the run enters `blocked_partial`. No final artifact is written until an interactive reviewer explicitly chooses `confirmed_partial`; `--auto-approve` cannot satisfy this confirmation. The final envelope then has `completion_status: "partial"` and non-empty `excluded_themes`.
+If retry cannot run or fails because of worker failure or call-budget exhaustion, the run enters `blocked_partial`. No final artifact is written until an interactive reviewer explicitly chooses `confirmed_partial`; `--auto-approve` cannot satisfy this confirmation. Before either complete or partial publication, every published critical/high finding requires one durable `accepted`, `deferred`, `rejected`, or `needs_evidence` disposition. The final envelope then has `completion_status: "partial"` and non-empty `excluded_themes`.
 
 ---
 
-## 12. Devin worker and QuickJS broker protocol
+## 12. DeepAgents worker and QuickJS broker protocol
 
-### 12.1 Network and transport boundary
+### 12.1 Provider and capability boundary
 
-The design distinguishes three channels:
+The only configured external transport is a ChatOpenAI-compatible model request. The default configuration targets OpenRouter and requires an explicit provider order with fallbacks disabled and `data_collection: "deny"`. Neither the shell nor workers receive a general HTTP, fetch, shell, child-process, environment, or host-filesystem tool. This is an application capability boundary; it does not claim that a remote provider is offline or that it provides an OS sandbox.
 
-1. **Devin transport:** the outer Devin CLI process communicates with Devin’s service. This required cloud transport is outside the child-process sandbox and is not described as offline.
-2. **Agent fetch tool:** worker policy denies all `Fetch(...)` permissions. Workers cannot use HTTP fetch tools to obtain sources or instructions.
-3. **Sandboxed child process traffic:** a non-empty Devin sandbox allowlist must contain no internet domain. The QuickJS bridge uses a Unix domain socket, not TCP/IP. Sandbox child processes therefore cannot make outbound network connections.
+The shell receives source metadata only. TypeScript ingests source text and constructs the mapper/theme packet. A worker receives the packet directly in its disposable scratch input directory. Only schema-validated plans and citation-audited findings return to the shell-facing tools.
 
-The runner launches Devin with `--sandbox`; it must fail closed when sandbox setup fails. `doctor` validates an effective per-worker policy containing the fetch deny and the child-network allowlist. If the installed Devin CLI/platform cannot enforce this separation, the harness refuses to run rather than treating a prompt instruction as network security.
+### 12.2 In-process worker protocol
 
-### 12.2 One-shot worker protocol
-
-Each mapper/theme process is a one-shot `devin -p` session in a disposable scratch workspace. It receives:
+Each mapper and theme worker is an in-process DeepAgents graph backed by `ChatOpenAI`, not a subprocess. It receives:
 
 - the role, profile, bounded theme (for theme workers), and output schema;
-- a read-only materialized context packet;
-- a per-worker QuickJS bridge command, Unix socket path, and single-use capability file;
-- explicit instruction that document content is untrusted data, not instructions;
-- the rule to emit exactly one JSON object and no Markdown fencing on stdout.
+- a read-only materialized `input/packet.json` context packet;
+- explicit system instructions that document content is untrusted data, not instructions;
+- native structured response handling validated as `MapperProposal` or `ThemeWorkerResult`;
+- for theme workers only, `execute_quickjs` as the sole non-filesystem computational tool.
 
-A one-shot final stdout does not preclude tool use **during** the Devin session. The QuickJS bridge below supplies the required request/response path while the session is active.
+The `ModelCallBudgetCallback` reserves a provider request before every chat-model start. On completion or failure, TypeScript writes a schema-validated immutable attempt artifact. It records outcome and bounded structured output only; raw provider exception text is intentionally omitted.
 
 ### 12.3 QuickJS request/response bridge
 
-Before launching a worker, the coordinator starts one local Unix-domain-socket broker at a `0600` socket path inside that worker’s scratch workspace. It creates a random, single-worker capability token stored in a `0600` capability file. The worker may invoke the supplied bridge client during its session:
+For a theme worker, TypeScript starts one local Unix-domain-socket/capability broker scoped to the disposable scratch directory. `execute_quickjs` receives script text plus requested artifact reads/writes, writes a temporary `0600` script, invokes the existing broker client, and always removes the temporary script. The broker validates the single-use capability, caller role, message size, packet-path allowlist, and output namespace before evaluating in embedded QuickJS.
 
-```text
-reg-compare worker-quickjs --socket <socket> --capability-file <file> --script <scratch-script>
-```
-
-The bridge client sends `{capability, caller_role, script, requested_reads, requested_writes}`. The coordinator validates token, caller role, message size, packet path allowlist, and output namespace, then executes the script in the embedded QuickJS runtime. It returns a JSON response to the bridge client’s stdout, which Devin can read and use before composing final worker stdout.
-
-The bridge is available only to theme workers and the evidence-audit stage. It is closed when the worker exits; a token cannot be reused by another worker or later run.
+The bridge returns a JSON tool result to the worker graph and is closed when the worker finishes. A capability cannot be reused by another worker or later run.
 
 ### 12.4 QuickJS virtual filesystem and writes
 
@@ -713,7 +698,7 @@ The runtime has no Node globals, `require`, imports, shell/process APIs, environ
 
 Document text, mapper output, worker stdout, QuickJS code, filenames, and review amendments are untrusted inputs at their respective boundaries.
 
-- Source text is stored as data records and supplied inside explicit `BEGIN UNTRUSTED REGULATORY SOURCE` / `END UNTRUSTED REGULATORY SOURCE` delimiters. It is never concatenated into system instructions.
+- Source text is stored as canonical data records in coordinator-built context packets. It is never concatenated into system instructions or returned by the shell source-discovery tool.
 - Worker system instructions state that source-language requests, tool instructions, URLs, credentials requests, and directions to alter records are content to analyze, not commands to follow.
 - The coordinator supplies paths, IDs, profiles, and limits; no source-controlled value forms a command, policy rule, or filesystem path.
 - Mapper labels are validated and coordinator-slugged before use. Citation IDs are resolved against schemas. Worker stdout and QuickJS results remain untrusted until validated.
@@ -793,41 +778,39 @@ npm test
 npm run build
 ```
 
-- **Unit:** normalizer, schemas, context selection, state ledger, report renderer, limits, and QuickJS restrictions.
-- **Integration:** mocked Devin runner, bridge protocol, retry behavior, interruption/resume, and policy enforcement.
-- **`test:sanity`:** one small public fixture smoke case with real authenticated `devin -p`, `--auto-approve`, concurrency one, and a call budget of three (one mapper plus up to two theme workers). It is included in `npm test`.
-- **`test:sanity:full`:** all four profile fixtures with their specified budgets; it is an explicit, more expensive command.
+- **Unit:** deterministic normalizer, schemas, context selection, ledger/state reconciliation, call reservations, manifest/attempt/progress validation, provider-routing parameters, review gates, shell filesystem denial, source isolation, citation audit, and QuickJS restrictions.
+- **Integration:** deterministic CLI option and workflow-boundary coverage. Mocks or LangChain fake tool-calling models are required; tests must not call OpenRouter.
+- **`test:sanity`:** local, credential-free `doctor()` smoke check. It verifies required local runtime dependencies only; model key and routing checks are informational.
+- **`test:sanity:full`:** the local sanity check plus fixture hash verification. It does not download source documents or make provider requests.
 
-A sanity expectation manifest must require `fixture_required_concept_ratio: 1.0`, `verified_finding_ratio: 1.0`, `theme_outcome_ratio: 1.0`, and an explicit `min_published_findings >= 1`; it may add profile-specific materiality/action thresholds.
-
-Missing/unavailable/un-authenticated Devin fails `npm test` immediately. A live sanity failure fails once and preserves artifacts; there is no automatic rerun that hides flakes. A fixture may be quarantined only by a reviewed manifest change containing an owner, reason, creation date, and expiry date. A quarantined fixture is excluded only from `test:sanity:full`; it is never silently excluded from the smoke case.
+`npm test` is intentionally non-networked. A real regression is a manual, explicit operation after `OPENROUTER_API_KEY` or `REG_COMPARE_API_KEY` and `REG_COMPARE_PROVIDER_ORDER` are configured: run a public-data comparison with a bounded budget, then run `reg-compare validate --run <directory>`. Failures preserve immutable artifacts and must not trigger unbounded automatic reruns.
 
 ### 15.3 Definition of done
 
-The release is complete only when:
+The implementation is complete only when:
 
-1. All commands and exit-code behavior in section 5 are implemented.
-2. The schemas, normalizer, packet limits, and state projection are enforced by tests.
-3. Every worker uses the scoped scratch/policy/packet contract and the QuickJS bridge is integration-tested.
+1. The conversational shell and scripted commands obey the stage and exit-code behavior in section 5.
+2. The schemas, normalizer, packets, immutable ledger, state projection, and model-call counter reconciliation are enforced by deterministic tests.
+3. Shell source isolation and built-in filesystem denial, plus worker scratch/packet restrictions and the QuickJS bridge, are tested without a provider request.
 4. Invalid citation claims cannot reach either final artifact.
-5. Partial outcomes are structured and cannot be auto-approved.
-6. Interrupted runs resume without redoing accepted work.
-7. PDF quality/language gates fail closed.
-8. Public/internal/confidential workspace controls and file modes are verified.
-9. Fixture manifest lifecycle and non-redistributable fallback work.
-10. `npm test` and `npm run build` pass in a configured environment; full fixture agent testing passes outside an approved, time-bounded quarantine.
+5. Complete and partial publication both require explicit reviewer decisions and all critical/high dispositions.
+6. Interrupted and legacy/incompatible runs fail or resume only through validated ledger state.
+7. PDF quality/language gates, classification consent, workspace file modes, and model provenance are validated.
+8. Fixture manifest lifecycle and non-redistributable fallback work.
+9. `npm test` and `npm run build` pass without network access; an explicitly configured real model regression is followed by `validate`.
 
 ---
 
-## 16. Required implementation spikes
+## 16. Real-model readiness checks
 
-Before enabling a production-like real-agent run, engineering must verify and test:
+Before enabling a production-like external-model regression, engineering must verify and test:
 
-1. The installed Devin CLI honors the generated worker `Read(...)` deny rules and sandbox rules when launched from a disposable scratch workspace.
-2. The effective policy blocks `Fetch(...)` and sandbox child-process egress while preserving required outer Devin service transport.
-3. `devin -p` reliably returns one bounded JSON output under the worker contract; malformed output is captured and retried exactly as specified.
-4. `quickjs-emscripten` enforces the configured memory/stack/interrupt limits and cannot access Node capabilities through the bridge.
-5. The selected PDF extractor produces stable page/line ordering and `canon-v1` citations for the actual UAE fixture PDFs.
-6. Public source terms permit each committed snapshot; otherwise the manifest-plus-operator-fetch fallback is used.
+1. The configured OpenRouter-compatible model supports the native tool-calling and structured-output sequence required by mapper and theme workers.
+2. `ChatOpenAI` forwards the pinned provider order, disabled fallbacks, and data-collection policy to the configured OpenRouter endpoint; the recorded provenance matches that effective request configuration.
+3. Callback-backed model reservations remain one-for-one with provider requests across tool loops, retries, timeouts, and concurrent theme workers.
+4. The shell's `StateBackend` plus deny-all permissions cannot expose real local files, and the worker `FilesystemBackend` cannot read outside `/input/**`.
+5. `quickjs-emscripten` enforces configured memory/stack/interrupt limits and cannot access Node capabilities through the broker.
+6. The selected PDF extractor produces stable page/line ordering and `canon-v1` citations for the actual UAE fixture PDFs.
+7. Public source terms permit each committed snapshot; otherwise the manifest-plus-operator-fetch fallback is used.
 
-A failed spike blocks the affected feature. The implementation must revise this specification or refuse the run; it must not quietly weaken evidence, isolation, network, or data-protection guarantees.
+A failed check blocks the affected feature. The implementation must revise this specification or refuse the real-model run; it must not quietly weaken evidence, auditability, routing, or data-protection guarantees.

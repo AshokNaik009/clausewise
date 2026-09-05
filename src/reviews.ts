@@ -53,18 +53,18 @@ export async function collectReview(input: ReviewInput): Promise<ReviewRecord> {
     if (response.startsWith("amend ") && response.slice(6).trim()) return createReviewRecord("plan", input.round, "interactive", "amended", response.slice(6).trim(), []);
     throw new RegCompareError("invalid_review_response", "Plan review must be approve, reject, or amend <text>.", 5);
   }
-  if (stage === "partial") {
-    const response = await prompt("Partial results exclude one or more themes. Enter confirm-partial to finalize, or reject: ");
-    if (response === "confirm-partial") return createReviewRecord("partial", input.round, "interactive", "confirmed_partial", null, []);
-    if (response === "reject") return createReviewRecord("partial", input.round, "interactive", "rejected", null, []);
-    throw new RegCompareError("invalid_review_response", "Partial review must be confirm-partial or reject.", 5);
-  }
   const required = (input.findings ?? []).filter((finding) => finding.materiality === "critical" || finding.materiality === "high");
   const dispositions: ReviewRecord["dispositions"] = [];
   for (const finding of required) {
     const response = await prompt(`Disposition ${finding.id} (${finding.title}): accepted, deferred, rejected, or needs_evidence: `);
     if (!["accepted", "deferred", "rejected", "needs_evidence"].includes(response)) throw new RegCompareError("invalid_review_response", `Invalid disposition for ${finding.id}.`, 5);
     dispositions.push({ finding_id: finding.id, value: response as "accepted" | "deferred" | "rejected" | "needs_evidence" });
+  }
+  if (stage === "partial") {
+    const response = await prompt("Partial results exclude one or more themes. Enter confirm-partial to finalize, or reject: ");
+    if (response === "confirm-partial") return createReviewRecord("partial", input.round, "interactive", "confirmed_partial", null, dispositions);
+    if (response === "reject") return createReviewRecord("partial", input.round, "interactive", "rejected", null, dispositions);
+    throw new RegCompareError("invalid_review_response", "Partial review must be confirm-partial or reject.", 5);
   }
   const response = await prompt("Enter approve or reject finalization: ");
   if (response === "reject") return createReviewRecord("final", input.round, "interactive", "rejected", null, dispositions);
@@ -82,7 +82,8 @@ export async function saveReview(workspace: Workspace, review: ReviewRecord): Pr
 }
 
 export function ensureFinalReview(review: ReviewRecord, findings: Finding[]): void {
-  if (review.stage !== "final" || review.decision !== "approved") throw new RegCompareError("final_review_rejected", "Final review did not approve publication.", 5);
+  const approved = (review.stage === "final" && review.decision === "approved") || (review.stage === "partial" && review.decision === "confirmed_partial");
+  if (!approved) throw new RegCompareError("final_review_rejected", "Final review did not approve publication.", 5);
   const expected = new Set(findings.filter((finding) => finding.materiality === "critical" || finding.materiality === "high").map((finding) => finding.id));
   const dispositions = new Map(review.dispositions.map((disposition) => [disposition.finding_id, disposition.value]));
   for (const findingId of expected) {

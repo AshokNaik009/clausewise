@@ -18,9 +18,10 @@ async function workspace() {
     data_classification: "public",
     options: {
       profile: "cross-guidance", dataClassification: "public", maxThemes: 1, concurrency: 1, agentCallBudget: 2, agentTimeoutSeconds: 30, maxSourcePages: 1, maxSourceChars: 10_000,
-      allowPartial: false, autoApprove: true, confirmExternalAgentAccess: false, confirmEncryptedWorkspace: false, retentionUntil: null,
+      allowPartial: false, autoApprove: true, confirmExternalModelAccess: false, confirmEncryptedWorkspace: false, retentionUntil: null,
     },
-    documents: [],
+    model: { model: "deepseek/deepseek-chat", base_url: "https://openrouter.ai/api/v1", temperature: 0, provider_order: ["approved-provider"], allow_fallbacks: false, data_collection: "deny" },
+    documents: ["baseline", "candidate"].map((document_id) => ({ document_id, display_name: `${document_id}.txt`, format: "text", language: "en", raw_artifact_path: `sources/raw/${document_id}.txt`, normalized_artifact_path: `sources/normalized/${document_id}.json`, sha256: "0".repeat(64), page_count: 1, record_count: 1, canonicalization_version: "canon-v1" })),
     normalization_version: "canon-v1",
   });
 }

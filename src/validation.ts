@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RegCompareError } from "./errors.js";
-import { analysisSchema, approvedPlanSchema, normalizedDocumentSchema, reviewRecordSchema, themeResultSchema, type Analysis, type NormalizedDocument } from "./schemas.js";
+import { analysisSchema, approvedPlanSchema, conversationProgressSchema, normalizedDocumentSchema, reviewRecordSchema, runManifestSchema, themeResultSchema, workerAttemptArtifactSchema, type Analysis, type NormalizedDocument } from "./schemas.js";
 import { policyGapDisclaimerText, renderReport } from "./report.js";
 import type { Workspace } from "./workspace.js";
 import { artifactPath, getManifest, getState, readJson, validateLedger } from "./workspace.js";
@@ -24,8 +24,19 @@ async function checkJsonArtifacts(workspace: Workspace, errors: string[]): Promi
   const checks: { directory: string; pattern: RegExp; parse: (value: unknown) => unknown }[] = [
     { directory: "sources/normalized", pattern: /\.json$/u, parse: (value) => normalizedDocumentSchema.parse(value) },
     { directory: "planning", pattern: /^plan-\d+\.json$/u, parse: (value) => approvedPlanSchema.parse(value) },
+    { directory: "planning", pattern: /^mapper-attempt-\d+\.json$/u, parse: (value) => {
+      const attempt = workerAttemptArtifactSchema.parse(value);
+      if (attempt.role !== "mapper") throw new RegCompareError("worker_attempt_role", "Mapper attempt artifact has the wrong worker role.", 3);
+      return attempt;
+    } },
     { directory: "reviews", pattern: /^(plan|final|partial)-\d+\.json$/u, parse: (value) => reviewRecordSchema.parse(value) },
-    { directory: "workers", pattern: /\.json$/u, parse: (value) => value },
+    { directory: "workers", pattern: /^attempt-\d+\.json$/u, parse: (value) => {
+      const attempt = workerAttemptArtifactSchema.parse(value);
+      if (attempt.role !== "theme_worker") throw new RegCompareError("worker_attempt_role", "Theme attempt artifact has the wrong worker role.", 3);
+      return attempt;
+    } },
+    { directory: "workers", pattern: /^theme-result-\d+\.json$/u, parse: (value) => themeResultSchema.parse(value) },
+    { directory: "audit", pattern: /^conversation-progress-\d+\.json$/u, parse: (value) => conversationProgressSchema.parse(value) },
   ];
   for (const check of checks) {
     const directory = artifactPath(workspace, check.directory);
@@ -79,6 +90,11 @@ function citationsValid(analysis: Analysis, documents: Map<string, NormalizedDoc
 export async function validateRun(workspace: Workspace): Promise<ValidationResult> {
   const errors: string[] = [];
   let state = "unknown";
+  try {
+    runManifestSchema.parse(await readJson(artifactPath(workspace, "manifest.json")));
+  } catch (error) {
+    errors.push(`manifest.json: ${error instanceof Error ? error.message : String(error)}`);
+  }
   try {
     state = (await validateLedger(workspace)).state;
   } catch (error) {

@@ -26,7 +26,7 @@ export interface RawRunInput {
   maxSourceChars?: string | number;
   allowPartial?: boolean;
   autoApprove?: boolean;
-  confirmExternalAgentAccess?: boolean;
+  confirmExternalModelAccess?: boolean;
   confirmEncryptedWorkspace?: boolean;
   retentionUntil?: string;
   dryRun?: boolean;
@@ -72,9 +72,9 @@ export function parseRunInput(raw: RawRunInput): RunInput {
   const allowPartial = Boolean(raw.allowPartial);
   const autoApprove = Boolean(raw.autoApprove);
   if (allowPartial && autoApprove) throw new RegCompareError("invalid_approval_mode", "--auto-approve cannot be combined with --allow-partial.", 1);
-  const confirmExternalAgentAccess = Boolean(raw.confirmExternalAgentAccess);
+  const confirmExternalModelAccess = Boolean(raw.confirmExternalModelAccess);
   const confirmEncryptedWorkspace = Boolean(raw.confirmEncryptedWorkspace);
-  if (classification.data !== "public" && !confirmExternalAgentAccess) throw new RegCompareError("external_agent_confirmation_required", "Internal and confidential data require --confirm-external-agent-access.", 2);
+  if (classification.data !== "public" && !confirmExternalModelAccess) throw new RegCompareError("external_model_confirmation_required", "Internal and confidential data require --confirm-external-model-access.", 2);
   if (classification.data === "confidential" && !confirmEncryptedWorkspace) throw new RegCompareError("encrypted_workspace_confirmation_required", "Confidential data requires --confirm-encrypted-workspace.", 2);
   const retentionUntil = validateRetention(raw.retentionUntil, classification.data);
   const baseline = resolve(raw.baseline);
@@ -96,7 +96,7 @@ export function parseRunInput(raw: RawRunInput): RunInput {
     maxSourceChars,
     allowPartial,
     autoApprove,
-    confirmExternalAgentAccess,
+    confirmExternalModelAccess,
     confirmEncryptedWorkspace,
     retentionUntil,
     dryRun: Boolean(raw.dryRun),

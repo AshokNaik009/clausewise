@@ -40,6 +40,46 @@ export const documentRefSchema = z.object({
   page_count: z.number().int().positive(),
   record_count: z.number().int().positive(),
   canonicalization_version: z.literal("canon-v1"),
+}).strict();
+
+export const runOptionsSchema = z.object({
+  profile: profileSchema,
+  dataClassification: classificationSchema,
+  maxThemes: z.number().int().min(1).max(6),
+  concurrency: z.number().int().min(1).max(3),
+  agentCallBudget: z.number().int().min(2).max(14),
+  agentTimeoutSeconds: z.number().int().min(30).max(900),
+  maxSourcePages: z.number().int().min(1).max(350),
+  maxSourceChars: z.number().int().min(10_000).max(2_500_000),
+  allowPartial: z.boolean(),
+  autoApprove: z.boolean(),
+  confirmExternalModelAccess: z.boolean(),
+  confirmEncryptedWorkspace: z.boolean(),
+  retentionUntil: z.string().datetime().nullable(),
+}).strict();
+
+export const modelProvenanceSchema = z.object({
+  model: z.string().min(1),
+  base_url: z.string().url(),
+  temperature: z.literal(0),
+  provider_order: z.array(z.string().min(1)).min(1),
+  allow_fallbacks: z.literal(false),
+  data_collection: z.literal("deny"),
+}).strict();
+
+export const runManifestSchema = z.object({
+  schema_version: schemaVersion,
+  run_id: z.string().uuid(),
+  created_at: z.string().datetime(),
+  profile: profileSchema,
+  options: runOptionsSchema,
+  data_classification: classificationSchema,
+  model: modelProvenanceSchema,
+  documents: z.array(documentRefSchema).length(2).refine((documents) => new Set(documents.map((document) => document.document_id)).size === 2, "Manifest documents must contain one baseline and one candidate source."),
+  normalization_version: z.literal("canon-v1"),
+}).strict().superRefine((manifest, context) => {
+  if (manifest.profile !== manifest.options.profile) context.addIssue({ code: "custom", path: ["options", "profile"], message: "Manifest profile must match its run options." });
+  if (manifest.data_classification !== manifest.options.dataClassification) context.addIssue({ code: "custom", path: ["options", "dataClassification"], message: "Manifest data classification must match its run options." });
 });
 
 export const citationClaimSchema = z.object({
@@ -106,6 +146,25 @@ export const themeWorkerResultSchema = z.object({
   outcome_rationale: z.string().min(1).max(2_000),
   candidate_findings: z.array(workerFindingSchema).max(30),
 }).strict();
+
+export const delegateOutcomeSchema = z.enum(["ok", "model_error", "schema_invalid", "timeout", "budget_exhausted"]);
+export const workerAttemptArtifactSchema = z.object({
+  schema_version: schemaVersion,
+  role: z.enum(["mapper", "theme_worker"]),
+  theme_id: z.string().regex(/^thm-\d{3}-[a-z0-9]+(?:-[a-z0-9]+){0,8}$/).nullable(),
+  command: z.literal("deepagents/openrouter"),
+  timestamps: z.object({ completed_at: z.string().datetime() }).strict(),
+  exit_status: z.number().int().nullable(),
+  signal: z.string().nullable(),
+  stderr_truncated: z.boolean(),
+  stderr: z.string(),
+  stdout: z.string(),
+  outcome: delegateOutcomeSchema,
+}).strict().superRefine((attempt, context) => {
+  if ((attempt.role === "mapper") !== (attempt.theme_id === null)) context.addIssue({ code: "custom", message: "Mapper attempts must have no theme ID and theme-worker attempts must have one." });
+  if (attempt.outcome === "ok" && attempt.exit_status !== 0) context.addIssue({ code: "custom", message: "Successful worker attempts must have exit status 0." });
+  if (attempt.outcome !== "ok" && attempt.exit_status !== null) context.addIssue({ code: "custom", message: "Failed worker attempts must not claim a process exit status." });
+});
 
 export const mapperProposalSchema = z.object({
   schema_version: schemaVersion,
@@ -225,7 +284,7 @@ export const eventSchema = z.object({
   schema_version: schemaVersion,
   run_id: z.string().uuid(),
   sequence: z.number().int().positive(),
-  type: z.enum(["state_transition", "artifact_created", "worker_started", "worker_finished", "review_recorded", "interrupted", "purge_intent"]),
+  type: z.enum(["state_transition", "artifact_created", "worker_started", "worker_finished", "model_call_started", "review_recorded", "interrupted", "purge_intent"]),
   timestamp: z.string().datetime(),
   actor: z.enum(["coordinator", "reviewer", "worker"]),
   payload: z.record(z.string(), z.unknown()),
@@ -250,6 +309,9 @@ export type Profile = z.infer<typeof profileSchema>;
 export type Classification = z.infer<typeof classificationSchema>;
 export type DocumentId = z.infer<typeof documentIdSchema>;
 export type SourceFormat = z.infer<typeof sourceFormatSchema>;
+export type RunOptionsData = z.infer<typeof runOptionsSchema>;
+export type ModelProvenanceData = z.infer<typeof modelProvenanceSchema>;
+export type RunManifestData = z.infer<typeof runManifestSchema>;
 export type NormalizedRecord = z.infer<typeof normalizedRecordSchema>;
 export type NormalizedDocument = z.infer<typeof normalizedDocumentSchema>;
 export type DocumentRef = z.infer<typeof documentRefSchema>;

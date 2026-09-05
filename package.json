@@ -7,7 +7,7 @@
     "test": "npm run test:unit && npm run test:integration && npm run test:sanity",
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",
-    "start": "tsx src/cli.ts",
+    "start": "tsx --env-file=.env src/cli.ts",
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",
     "test:sanity": "tsx test/sanity.ts",

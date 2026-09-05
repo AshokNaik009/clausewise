@@ -7,6 +7,8 @@ export const LIMITS = {
   minAgentCallBudget: 2,
   maxAgentCallBudget: 14,
   defaultAgentCallBudget: 9,
+  maxDelegateRecursionLimit: 24,
+  maxShellModelCalls: 100,
   defaultAgentTimeoutSeconds: 300,
   minAgentTimeoutSeconds: 30,
   maxAgentTimeoutSeconds: 900,
