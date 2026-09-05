@@ -1,0 +1,12 @@
+{
+  "expected_profile": "version-change",
+  "min_published_findings": 4,
+  "required_concept_ids": [
+    "str-filing-deadline",
+    "investigation-record-keeping",
+    "post-filing-enhanced-monitoring",
+    "aml-cft-legal-basis"
+  ],
+  "minimum_materiality_counts": { "high": 1 },
+  "minimum_action_counts": { "implement": 1 }
+}

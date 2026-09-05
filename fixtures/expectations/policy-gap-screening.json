@@ -1,0 +1,12 @@
+{
+  "expected_profile": "policy-gap",
+  "min_published_findings": 3,
+  "required_concept_ids": [
+    "sanctions-screening",
+    "transaction-monitoring",
+    "mlro-designation",
+    "record-retention",
+    "aml-training"
+  ],
+  "minimum_action_counts": { "assess": 1 }
+}
