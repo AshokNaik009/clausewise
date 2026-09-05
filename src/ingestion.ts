@@ -66,26 +66,25 @@ async function extractPdfPages(source: Buffer): Promise<string[]> {
 }
 
 function calculateScriptRatios(value: string): { latin: number; arabic: number } {
-  const alphabetic = [...value].filter((character) => /\p{L}/u.test(character));
+  const alphabetic = [...value].filter((character) => /\p{L}/u.test(character)).slice(0, 20_000);
   if (!alphabetic.length) return { latin: 0, arabic: 0 };
   const latin = alphabetic.filter((character) => /\p{Script=Latin}/u.test(character)).length / alphabetic.length;
   const arabic = alphabetic.filter((character) => /\p{Script=Arabic}/u.test(character)).length / alphabetic.length;
   return { latin, arabic };
 }
 
-function validateTextQuality(normalized: NormalizedDocument, format: SourceFormat, maxPages: number, maxChars: number): { totalChars: number; textualPages: number; ratios: { latin: number; arabic: number } } {
+function validateTextQuality(normalized: NormalizedDocument, format: SourceFormat, sourcePageCount: number, maxPages: number, maxChars: number): { totalChars: number; textualPages: number; ratios: { latin: number; arabic: number } } {
+  assert(sourcePageCount <= maxPages, "source_too_large", `Source exceeds the ${maxPages}-page limit.`);
   const pages = new Map<number, number>();
   for (const record of normalized.records) {
     const page = record.page ?? 1;
     pages.set(page, (pages.get(page) ?? 0) + record.canonical_text.replace(/\s/gu, "").length);
   }
-  const pageCount = pages.size;
-  assert(pageCount <= maxPages, "source_too_large", `Source exceeds the ${maxPages}-page limit.`);
-  const totalChars = normalized.records.reduce((total, record) => total + record.canonical_text.length, 0);
+  const totalChars = normalized.records.map((record) => record.canonical_text).join("\n").length;
   assert(totalChars <= maxChars, "source_too_large", `Source exceeds the ${maxChars}-character limit.`);
   const textualPages = [...pages.values()].filter((count) => count >= 100).length;
-  const minimumChars = Math.max(1_000, 200 * pageCount);
-  if (format === "pdf" && (totalChars < minimumChars || textualPages / pageCount < 0.8)) {
+  const minimumChars = Math.max(1_000, 200 * sourcePageCount);
+  if (format === "pdf" && (totalChars < minimumChars || textualPages / sourcePageCount < 0.8)) {
     throw new RegCompareError("needs_ocr", "PDF extraction is too sparse for evidence-backed analysis. Provide an OCRed PDF or approved transcription.", 2);
   }
   const ratios = calculateScriptRatios(normalized.records.map((record) => record.canonical_text).join("\n"));
@@ -102,7 +101,7 @@ export async function ingestDocument(documentId: DocumentId, path: string, limit
   const source = await readFile(path);
   const pages = format === "pdf" ? await extractPdfPages(source) : [strictUtf8(source)];
   const normalized = normalizePages(documentId, format, pages);
-  const quality = validateTextQuality(normalized, format, limits.maxPages, limits.maxChars);
+  const quality = validateTextQuality(normalized, format, pages.length, limits.maxPages, limits.maxChars);
   const rawPath = `sources/raw/${documentId}${extname(path).toLowerCase()}`;
   const normalizedPath = `sources/normalized/${documentId}.json`;
   return {

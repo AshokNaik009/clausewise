@@ -23,6 +23,7 @@
     "@langchain/langgraph-sdk": "1.9.23",
     "commander": "13.1.0",
     "deepagents": "1.13.1",
+    "figlet": "^1.11.4",
     "langchain": "1.5.10",
     "langsmith": "0.9.0",
     "pdfjs-dist": "4.10.38",

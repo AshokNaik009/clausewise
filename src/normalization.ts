@@ -10,7 +10,7 @@ export function canonicalizeLine(value: string): string {
     .replace(/\r\n?|\n/gu, "\n")
     .replace(/[^\S\r\n]+/gu, " ")
     .replace(/ {2,}/gu, " ")
-    .trim();
+    .replace(/^ +| +$/gu, "");
 }
 
 export function canonicalizeExcerpt(value: string): string {
@@ -18,8 +18,10 @@ export function canonicalizeExcerpt(value: string): string {
     .normalize("NFKC")
     .replace(/[\u00AD\u200B\u200C\u200D\uFEFF]/gu, "")
     .replace(/\r\n?|\n/gu, "\n")
+    .replace(/[^\S\r\n]+/gu, " ")
+    .replace(/ {2,}/gu, " ")
     .split("\n")
-    .map(canonicalizeLine)
+    .map((line) => line.replace(/^ +| +$/gu, ""))
     .join("\n");
 }
 
