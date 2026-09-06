@@ -11,6 +11,15 @@ export interface PacketRecord {
   canonical_text: string;
 }
 
+// The mapper only needs an ID it can copy verbatim plus the text to reason over. document_id,
+// ordinal, page and global_line are all recoverable from record_id, and at ~2k records their
+// JSON overhead dwarfs the text itself, so they are omitted here (theme packets keep them).
+export interface MapperPacketRecord {
+  record_id: string;
+  heading?: string;
+  canonical_text: string;
+}
+
 interface DocumentIndexEntry {
   document_id: DocumentId;
   structural_unit: string;
@@ -19,6 +28,7 @@ interface DocumentIndexEntry {
   global_line_start: number;
   global_line_end: number;
   record_ids: string[];
+  record_count: number;
   canonical_character_count: number;
 }
 
@@ -27,7 +37,7 @@ export interface MapperPacket {
   kind: "mapper";
   profile: string;
   document_index: DocumentIndexEntry[];
-  sampled_records: PacketRecord[];
+  sampled_records: MapperPacketRecord[];
   coverage: {
     canonical_characters: number;
     source_canonical_characters: number;
@@ -51,6 +61,14 @@ export interface ThemePacket {
     canonical_characters: number;
     approximate_token_estimate: number;
     context_truncated: boolean;
+  };
+}
+
+function mapperPacketRecord(record: NormalizedRecord): MapperPacketRecord {
+  return {
+    record_id: record.record_id,
+    ...(record.heading ? { heading: record.heading } : {}),
+    canonical_text: record.canonical_text,
   };
 }
 
@@ -89,7 +107,8 @@ function structuralIndex(document: NormalizedDocument): DocumentIndexEntry[] {
     page_end: records.at(-1)?.page ?? null,
     global_line_start: records[0]?.global_line ?? 1,
     global_line_end: records.at(-1)?.global_line ?? 1,
-    record_ids: records.map((record) => record.record_id),
+    record_ids: records.slice(0, LIMITS.mapperIndexRecordIds).map((record) => record.record_id),
+    record_count: records.length,
     canonical_character_count: recordCharacters(records),
   }));
 }
@@ -107,12 +126,21 @@ function addWithinLimit(selected: NormalizedRecord[], candidate: NormalizedRecor
   return true;
 }
 
+// Keeps an even spread across the document rather than truncating to the front, so the mapper
+// still sees the shape of the whole instrument when a document has many structural units.
+function evenSample<T>(entries: T[], limit: number): T[] {
+  if (entries.length <= limit) return entries;
+  const step = entries.length / limit;
+  return Array.from({ length: limit }, (_unused, index) => entries[Math.floor(index * step)]!);
+}
+
 export function buildMapperPacket(profile: string, documents: NormalizedDocument[], maxChars = LIMITS.mapperContextChars): MapperPacket {
-  const documentIndex = documents.flatMap(structuralIndex);
+  const detectedIndex = documents.flatMap(structuralIndex);
+  const documentIndex = evenSample(detectedIndex, LIMITS.mapperIndexEntries);
   const candidates = documents.flatMap((document) => document.records.filter((record) => record.canonical_text));
   const selected: NormalizedRecord[] = [];
   const usedCharacters = { value: 0 };
-  const seedRecords = documentIndex.map((entry) => entry.record_ids[0]).filter((value): value is string => Boolean(value));
+  const seedRecords = detectedIndex.map((entry) => entry.record_ids[0]).filter((value): value is string => Boolean(value));
   for (const recordId of seedRecords) {
     const record = candidates.find((candidate) => candidate.record_id === recordId);
     if (record) addWithinLimit(selected, record, maxChars, usedCharacters);
@@ -120,19 +148,30 @@ export function buildMapperPacket(profile: string, documents: NormalizedDocument
   const scored = [...candidates].sort((left, right) => markerScore(right) - markerScore(left) || left.ordinal - right.ordinal);
   for (const record of scored) addWithinLimit(selected, record, maxChars, usedCharacters);
   const sourceChars = canonicalCharacters(documents);
+  // The character budget above governs canonical text only; per-record JSON overhead can still
+  // push the serialized packet far past it, so trim the sample until the packet itself fits.
+  let sampled = selected.map(mapperPacketRecord);
+  let sampledCharacters = usedCharacters.value;
+  const serializedBytes = (records: MapperPacketRecord[]): number =>
+    Buffer.byteLength(JSON.stringify({ document_index: documentIndex, sampled_records: records }), "utf8");
+  while (sampled.length > 1 && serializedBytes(sampled) > LIMITS.mapperPacketBytes) {
+    const dropped = sampled[sampled.length - 1];
+    sampled = sampled.slice(0, -1);
+    sampledCharacters -= dropped?.canonical_text.length ?? 0;
+  }
   return {
     schema_version: "1.0",
     kind: "mapper",
     profile,
     document_index: documentIndex,
-    sampled_records: selected.map((record) => packetRecord(record.record_id.startsWith("baseline:") ? "baseline" : "candidate", record)),
+    sampled_records: sampled,
     coverage: {
-      canonical_characters: usedCharacters.value,
+      canonical_characters: sampledCharacters,
       source_canonical_characters: sourceChars,
-      body_sample_ratio: sourceChars === 0 ? 0 : usedCharacters.value / sourceChars,
+      body_sample_ratio: sourceChars === 0 ? 0 : sampledCharacters / sourceChars,
       indexed_structural_units: documentIndex.length,
-      detected_structural_units: documentIndex.length,
-      context_truncated: selected.length < candidates.length,
+      detected_structural_units: detectedIndex.length,
+      context_truncated: sampled.length < candidates.length,
     },
   };
 }

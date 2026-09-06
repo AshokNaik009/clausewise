@@ -3,6 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { auditThemeResult, applyFindingIds, type AuditResult } from "./audit.js";
 import { invokeSemanticDelegate } from "./agents.js";
+import { LIMITS } from "./constants.js";
 import { buildMapperPacket, buildThemePacket, type ThemePacket } from "./context.js";
 import { RegCompareError } from "./errors.js";
 import { ingestDocument, type IngestedDocument } from "./ingestion.js";
@@ -60,13 +61,23 @@ function themeId(index: number, label: string): string {
   return `thm-${String(index).padStart(3, "0")}-${slug(label)}`;
 }
 
+// Accepts a near-miss like "baseline:p1:l1" and restores the canonical fixed-width form so a
+// real record is not discarded over padding. Returns null when it is not a record ID at all.
+function canonicalizeRecordId(recordId: string): string | null {
+  const match = /^(baseline|candidate):p(\d{1,4}):l(\d{1,6})$/u.exec(recordId.trim());
+  if (!match) return null;
+  return `${match[1]}:p${match[2]!.padStart(4, "0")}:l${match[3]!.padStart(6, "0")}`;
+}
+
 function safeMapperProposals(proposal: MapperProposal, documents: NormalizedDocument[]): PlanThemeSeed[] {
   const validRecords = new Set(documents.flatMap((document) => document.records.map((record) => record.record_id)));
   const deduplicated = new Set<string>();
   const themes: PlanThemeSeed[] = [];
   for (const candidate of proposal.proposals) {
     const key = canonicalizeExcerpt(candidate.label).toLocaleLowerCase("en");
-    const seeds = [...new Set(candidate.seed_record_ids)].filter((recordId) => validRecords.has(recordId));
+    const seeds = [...new Set(candidate.seed_record_ids
+      .map((recordId) => canonicalizeRecordId(recordId))
+      .filter((recordId): recordId is string => recordId !== null && validRecords.has(recordId)))];
     if (!key || deduplicated.has(key) || !seeds.length) continue;
     deduplicated.add(key);
     themes.push({ label: candidate.label, description: candidate.description, keywords: [...new Set(candidate.keywords)], seed_record_ids: seeds });
@@ -77,7 +88,7 @@ function safeMapperProposals(proposal: MapperProposal, documents: NormalizedDocu
 export function deriveApprovedPlan(profile: Profile, proposalValue: unknown, documents: NormalizedDocument[], round: number, mapperArtifactPath: string, options: RunInput, usedCalls: number): { plan: ApprovedPlan; packets: Map<string, ThemePacket> } {
   const proposal = mapperProposalSchema.parse(proposalValue);
   const remaining = options.agentCallBudget - usedCalls;
-  const effectiveCap = Math.min(options.maxThemes, remaining);
+  const effectiveCap = Math.min(options.maxThemes, Math.floor(remaining / LIMITS.minimumThemeProviderCalls));
   const seeds = safeMapperProposals(proposal, documents).slice(0, effectiveCap);
   if (!seeds.length) throw new RegCompareError("no_valid_themes", "Mapper returned no valid themes within the available theme and call budgets.", 5);
   const packets = new Map<string, ThemePacket>();
@@ -190,10 +201,10 @@ async function createPlan(workspace: Workspace, input: RunInput, documents: Norm
   const primary = await mapperAttempt(workspace, input, packet, await nextMapperAttempt(workspace));
   let mapper = primary;
   if (mapper.error || !mapper.artifact || !mapperProposalSchema.safeParse(mapper.result).success) {
-    if (round > 1 || (await getState(workspace)).remaining_agent_calls <= 0) throw new RegCompareError("mapper_failed", "Mapper revision failed after the allowed semantic amendment or exhausted the model-call budget.", 5);
+    if (round > 1 || (await getState(workspace)).remaining_agent_calls <= 0) throw new RegCompareError("mapper_failed", `Mapper revision failed after the allowed semantic amendment or exhausted the model-call budget (${mapper.error ?? "invalid result"}).`, 5);
     mapper = await mapperAttempt(workspace, input, packet, await nextMapperAttempt(workspace));
   }
-  if (mapper.error || !mapper.artifact || !mapperProposalSchema.safeParse(mapper.result).success) throw new RegCompareError("mapper_failed", "Mapper failed after its single corrective retry.", 5);
+  if (mapper.error || !mapper.artifact || !mapperProposalSchema.safeParse(mapper.result).success) throw new RegCompareError("mapper_failed", `Mapper failed after its single corrective retry (${mapper.error ?? "invalid result"}).`, 5);
   const used = (await getState(workspace)).used_agent_calls;
   const { plan, packets } = deriveApprovedPlan(input.profile, mapper.result, documents, round, mapper.artifact, input, used);
   for (const [id, themePacket] of packets) await writeArtifact(workspace, `context/${id.match(/^thm-\d{3}/u)?.[0] ?? "thm-000"}/packet.json`, themePacket);
@@ -638,7 +649,8 @@ export async function runComparison(rawInput: RunInput | Parameters<typeof parse
     await ingestDocument("candidate", input.candidate, { maxPages: input.maxSourcePages, maxChars: input.maxSourceChars }),
   ];
   if (input.dryRun) {
-    return { run_directory: input.output, run_id: null, state: "dry_run", dry_run: true, plan: { effective_theme_cap: Math.min(input.maxThemes, input.agentCallBudget - 1), remaining_agent_calls: input.agentCallBudget - 1, source_stats: sourceStats(documents) } };
+    const remainingCalls = Math.max(0, input.agentCallBudget - LIMITS.minimumMapperProviderCalls);
+    return { run_directory: input.output, run_id: null, state: "dry_run", dry_run: true, plan: { effective_theme_cap: Math.min(input.maxThemes, Math.floor(remainingCalls / LIMITS.minimumThemeProviderCalls)), remaining_agent_calls: remainingCalls, source_stats: sourceStats(documents) } };
   }
   await assertDoctor();
   const workspace = await createWorkspace(input.output, { profile: input.profile, options: runOptions(input), data_classification: input.dataClassification, model: assertExternalModelConfigured(), documents: documents.map((document) => document.ref), normalization_version: "canon-v1" });
@@ -765,6 +777,14 @@ export async function resumeComparison(runDirectory: string, autoApprove: boolea
     }
     const finalState = await getState(workspace);
     return { run_directory: workspace.root, run_id: workspace.runId, state: finalState.state, dry_run: false };
+  } catch (error) {
+    // Every other entry point transitions to failed on error; without this a failure during
+    // recovery leaves the run stranded in its mid-flight state a second time.
+    const current = await getState(workspace);
+    if (!["failed", "finalized", "cancelled", "blocked_partial"].includes(current.state)) {
+      await transitionState(workspace, "failed", { active_review_stage: null });
+    }
+    throw error;
   } finally {
     removeInterruptHandler();
     await releaseLock(workspace);

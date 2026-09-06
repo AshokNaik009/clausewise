@@ -1,7 +1,10 @@
 import { sha256, canonicalizeExcerpt, canonicalSpan } from "./normalization.js";
 import type { CitationClaim, NormalizedDocument, NormalizedRecord } from "./schemas.js";
 
+const MAX_EXCERPT_CHARACTERS = 4_000;
+
 export interface VerifiedCitation extends CitationClaim {
+  excerpt: string;
   page_start: number | null;
   page_end: number | null;
   global_line_start: number;
@@ -13,7 +16,7 @@ export interface VerifiedCitation extends CitationClaim {
 }
 
 export interface CitationRejection {
-  code: "unknown_document" | "record_not_found" | "record_range_invalid" | "non_canonical_excerpt" | "excerpt_not_in_span";
+  code: "unknown_document" | "record_not_found" | "record_range_invalid" | "record_range_too_broad";
   message: string;
 }
 
@@ -32,19 +35,25 @@ export function verifyCitation(documents: Map<string, NormalizedDocument>, claim
   }
   const span = canonicalSpan(document.records, claim.start_record_id, claim.end_record_id);
   if (span === null) return { code: "record_range_invalid", message: "Citation range is reversed or invalid." };
-  if (canonicalizeExcerpt(claim.excerpt) !== claim.excerpt) {
-    return { code: "non_canonical_excerpt", message: "Citation excerpt is not canon-v1 normalized." };
+  // The excerpt is derived from the stored source rather than matched against the model's
+  // transcription. Exact matching demanded that a model reproduce the newline this harness
+  // inserts between records, which no model does reliably; deriving it makes the quoted text
+  // correct by construction and keeps the locator the only thing the model must get right.
+  const excerpt = canonicalizeExcerpt(span);
+  if (!excerpt) return { code: "record_range_invalid", message: "Citation range resolves to empty source text." };
+  if (excerpt.length > MAX_EXCERPT_CHARACTERS) {
+    return { code: "record_range_too_broad", message: `Citation range spans ${excerpt.length} characters; cite a range within ${MAX_EXCERPT_CHARACTERS}.` };
   }
-  if (!span.includes(claim.excerpt)) return { code: "excerpt_not_in_span", message: "Citation excerpt is absent from its claimed canonical record span." };
   return {
     ...claim,
+    excerpt,
     page_start: start.page,
     page_end: end.page,
     global_line_start: start.global_line,
     global_line_end: end.global_line,
     heading_start: start.heading,
     heading_end: end.heading,
-    excerpt_sha256: sha256(claim.excerpt),
+    excerpt_sha256: sha256(excerpt),
     verified: true,
   };
 }

@@ -87,6 +87,8 @@ Limits are application-enforced. The defaults are intentionally conservative and
 
 `--agent-call-budget` counts actual chat-model requests, including mapper/worker tool loops and retry attempts—not delegate invocations. A LangChain callback calls `reserveModelCall()` immediately before every provider request. The atomic reservation writes a `model_call_started` event containing the new state projection. Ledger validation requires contiguous call numbers, valid mapper/theme association, and equality between the immutable reservations, `used_agent_calls`, `remaining_agent_calls`, and the configured budget.
 
+A mapper and each theme worker are independently capped at three provider requests. Planning reserves two remaining provider requests for each selected theme, so it does not approve a theme set that a healthy read-packet/structured-response flow cannot start. These local ceilings stop an individual malformed tool loop before it depletes the run-wide budget.
+
 The shell applies `LIMITS.maxShellModelCalls = 100` independently in memory. Its requests coordinate a conversation rather than analyze a run, so they are intentionally outside the analysis budget and have no cross-process durability.
 
 ---

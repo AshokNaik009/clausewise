@@ -5,8 +5,8 @@ produces an auditable result a compliance reviewer can sign off on. You talk to 
 language; it resolves what you meant, runs the work, stops for your approval at the two points
 that matter, and then answers questions about what it found.
 
-Status: **conversational harness operational.** The build contract is [SPEC.md](./SPEC.md); the
-reasoning behind it is [DECISIONS.md](./DECISIONS.md).
+Status: **conversational harness operational.** The build contract is [SPEC.md](./docs/SPEC.md); the
+reasoning behind it is [DECISIONS.md](./docs/DECISIONS.md).
 
 > The command is still `reg-compare` while the binary rename lands in `package.json`. Every
 > example below uses the current command name.
@@ -112,9 +112,10 @@ which one it picked; you can override it in the same sentence or at the plan gat
 
 These are what separate this from a chat prompt, and they are release gates:
 
-- **Every material finding cites exact, verifiable source text.** The excerpt must resolve to its
-  stated page/line locator in the stored normalized source. Citations that fail verification
-  cannot reach `analysis.json` or `report.md`.
+- **Every material finding cites exact, verifiable source text.** The model supplies only the
+  record range; the harness quotes the source itself from that span, so a citation cannot misquote
+  what it cites. A range that does not resolve, or that is too broad to be evidence, is rejected
+  and cannot reach `analysis.json` or `report.md`.
 - **A human approves the scope, and a human dispositions the consequences.** Two mandatory
   gates, enforced in the graph rather than in a prompt: the model cannot reach a finalized run
   without passing through both. Non-interactive approval exists only for automated fixtures and
@@ -235,6 +236,19 @@ denied. Subagents give up that boundary, and the README should say so plainly. W
 - Each delegate gets its own context — source text never enters the shell agent's conversation.
 - Delegates hold no shell, network, or host-filesystem tools; the only capability they have
   beyond reading their context packet is the scoped QuickJS bridge.
+- That packet lives in a per-delegate temporary directory, and the read is scoped to it by an
+  allow rule ahead of a deny-everything rule. `FilesystemBackend` addresses **real** filesystem
+  paths rather than a chroot, so the permission globs, the prompt, and the backend are all built
+  from the same canonicalized (`realpath`) scratch directory. A virtual-looking path such as
+  `/input/packet.json` is not scoped to the sandbox — it resolves against the host root.
+- The delegate's backend runs in `virtualMode`, so `rootDir` is a genuine virtual root: the
+  delegate addresses `/input/packet.json`, traversal (`..`, `~`) and absolute escapes are refused
+  by the backend, and the permission globs match the namespace the delegate is told about. Without
+  it `rootDir` is only a cwd for relative paths and an absolute path resolves against the host root.
+- The QuickJS broker's Unix socket lives in its own short-named directory, not under the delegate
+  scratch path. A socket path is capped by `sockaddr_un.sun_path` (104 bytes on macOS, 108 on
+  Linux), and a scratch-relative path exceeded it — `listen()` bound nothing and the broker could
+  not start. Scripts are passed to the broker in memory and never written to disk.
 - A delegate's result crosses back into the coordinator **only** as a JSON object that is zod-
   validated and citation-audited. It is never spliced into the shell agent's message history as
   free text.
@@ -302,7 +316,7 @@ started in conversation can be inspected, validated, or continued with the scrip
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in your key. `npm start` loads it; `.env` is gitignored.
+Create a local `.env` with your key and routing settings. `npm start` loads it; `.env` is gitignored.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-v1-...              # or REG_COMPARE_API_KEY
@@ -328,20 +342,27 @@ curl -s "https://openrouter.ai/api/v1/models/<author>/<slug>/endpoints" \
 
 ### Free-tier accounts
 
-A free-tier OpenRouter key reaches only `:free` models, and the harness needs one that supports
-tool calling — the shell and every subagent are tool-driven. `minimax/minimax-m3:free`
-(`GMICloud`, 1M context) and `nvidia/nemotron-3.5-lightning:free` (`Nvidia`) both work.
+The shell and every worker require tool calling. OpenRouter catalog availability changes, so do
+not hardcode a free-model list: the authenticated catalog query during this session returned 431
+text models, 22 zero-cost text models, and 17 zero-cost models advertising both `tools` and
+`tool_choice`. The configured `minimax/minimax-m3:free` route resolves to GMICloud and currently
+advertises both capabilities with a 1M-token context window. Run the catalog query again before
+changing model or provider routing.
 
-Two failure modes worth recognizing, because neither names the real cause:
+A `:free` variant has zero token price but still has account and rate-limit constraints. Two
+failure modes worth recognizing:
 
-- **`402 ... requires more credits, or fewer max_tokens`** on a paid model. The client requests
-  `max_tokens: 16384` up front, so a near-zero balance fails the request before any tokens are
-  generated. In the shell this surfaces only as `model_error`.
-- **`404 This model is unavailable for free`.** Retired `:free` slugs — the response names the
-  paid replacement, which a free-tier key still cannot reach.
+- **`402 ... requires more credits, or fewer max_tokens`** means the account/key does not have
+  sufficient available credit for that request. The harness does not set `max_tokens`; the model
+  and provider decide their own default completion cap. In the shell this surfaces as
+  `model_error` unless a typed harness stage can classify it further.
+- **`404 This model is unavailable for free`** means the selected free variant is unavailable or
+  retired. Re-query the catalog and endpoint list rather than assuming a paid replacement is
+  accessible to the key.
 
-`doctor --network` will report PASS in both cases: it probes the models endpoint, not a
-completion, so it confirms the key and the route but not that you can afford a request.
+`doctor --network` can still report PASS in both cases: it probes the catalog endpoint, not a
+completion or the selected model's endpoints, so it confirms neither request affordability nor
+model-specific route availability.
 
 `reg-compare doctor` checks Node, npm, and QuickJS locally. API-key and routing configuration
 are reported but do not make the local doctor fail; endpoint reachability is an explicit
@@ -358,13 +379,36 @@ There are deliberately two distinct limits:
 
 | Limit | Scope |
 | --- | --- |
-| `--agent-call-budget` (2–14) | External **analysis provider requests**, including mapper/worker tool loops and retries |
+| `--agent-call-budget` (2–48) | External **analysis provider requests**, including mapper/worker tool loops and retries |
 | `LIMITS.maxShellModelCalls` (100) | In-memory shell-session requests; independent of any run and reset when the shell exits |
 
 Immediately before every mapper or worker chat-model request, a callback atomically reserves one
 analysis call. The reservation writes an immutable `model_call_started` ledger event with a state
 projection. `validate` reconciles those events against `run-state.json` and the configured budget,
-so retries cannot silently spend past the cap.
+so retries cannot silently spend past the cap. A mapper and each theme worker have an independent
+three-request ceiling; the plan reserves a minimum of two remaining requests for every approved
+theme, preventing a mapper loop from consuming the entire run budget.
+
+Note that a delegate is an agentic loop, not a single inference: reading the packet costs one
+request, answering costs another, and each structured-output repair costs one more. A
+three-request ceiling therefore leaves room for roughly one repair, and a delegate that needs an
+extra tool turn exhausts it. When it does, the delegate's outcome is `model_error`, which reads
+as model incapability even when the cause is the harness — check the attempt artifact before
+concluding the model is at fault.
+
+### Diagnosing a failed delegate
+
+A failed mapper or worker attempt records the real reason, not just its outcome class:
+
+| File | Contents |
+| --- | --- |
+| `planning/mapper-attempt-<n>.json` | Outcome plus the underlying error in `stderr`, redacted and bounded by `LIMITS.workerErrorBytes` |
+| `planning/mapper-rejected-<n>.json` | The model output that was rejected, so a schema failure can be inspected |
+| `workers/<theme>/attempt-<n>.json` | The same for each theme worker |
+| `logs/orchestrator.ndjson` | Stage-level operational log |
+
+Earlier builds deliberately stored no exception text; that made a genuine failure impossible to
+diagnose, and the decision was reversed. Credentials are redacted before anything is written.
 
 ### Data classification
 
@@ -380,8 +424,8 @@ classifying anything above `public`.
 
 | | |
 | --- | --- |
-| Specification | [SPEC.md](./SPEC.md) — approved build spec |
-| Decision log | [DECISIONS.md](./DECISIONS.md) |
+| Specification | [SPEC.md](./docs/SPEC.md) — approved build spec |
+| Decision log | [DECISIONS.md](./docs/DECISIONS.md) |
 | Implementation | conversational harness operational; batch path at parity |
 
 Technical spikes that gate "core complete" (SPEC §16): reliable structured output and multi-turn
