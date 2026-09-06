@@ -1,172 +1,152 @@
 # Clausewise
 
-**Clausewise** compares two regulatory documents **by theme and evidence**, not by line diff, and
-produces an auditable result a compliance reviewer can sign off on. You talk to it in plain
-language; it resolves what you meant, runs the work, stops for your approval at the two points
-that matter, and then answers questions about what it found.
+Clausewise compares two regulatory documents by **theme and evidence** rather than by line diff,
+and produces a result a compliance reviewer can sign their name to.
 
-Status: **conversational harness operational.** The build contract is [SPEC.md](./docs/SPEC.md); the
-reasoning behind it is [DECISIONS.md](./docs/DECISIONS.md).
+You talk to it in plain language. It works out what you meant, does the work, stops twice for your
+approval, and then answers questions about what it found.
 
-> The command is still `reg-compare` while the binary rename lands in `package.json`. Every
-> example below uses the current command name.
+The build contract is [SPEC.md](./docs/SPEC.md); the reasoning behind it is
+[DECISIONS.md](./docs/DECISIONS.md).
+
+> The command is still `reg-compare` inside `package.json`, so examples below use it. Run it with
+> `npm start`, which loads your `.env`.
 
 ---
 
-## What problem does this solve, for whom, and what's the measurable outcome?
+## The problem
 
-### The problem
+When a regulator publishes new AML/CFT material, a compliance team needs three answers: what
+changed, which obligations now need action, and where our policies fall short. Today an analyst
+reads both documents end to end and annotates by hand — days of work per publication, repeated for
+every circular, consultation and version bump, and only as good as whoever was assigned.
 
-When a regulator publishes new AML/CFT material, a compliance team has to answer three
-questions: what changed, which obligations now require action, and where do our policies fall
-short of the requirement. Today that answer is produced by an analyst reading both documents
-end to end and annotating by hand — days of work per publication, repeated across every
-circular, consultation, and version bump, and the quality of the answer depends entirely on who
-was assigned to read it.
+Two obvious shortcuts both fail:
 
-The two obvious shortcuts both fail:
+- **A text diff can't answer the question.** Two documents often describe the same obligation with
+  different structure, scope and vocabulary. A diff reports hundreds of irrelevant edits and misses
+  the one that matters.
+- **A chatbot summary can't be audited.** Ask an LLM to "compare these PDFs" and you get fluent
+  prose with no traceable link to the source. A claim you cannot locate is a claim you cannot
+  defend to a regulator, an auditor, or a board.
 
-- **A textual diff cannot answer these questions.** Two documents routinely describe the same
-  obligation with different structure, scope, legal status, and vocabulary — so a diff reports
-  hundreds of irrelevant edits and misses the one substantive change.
-- **A general-purpose LLM produces fluent summaries nobody can audit.** Ask a chatbot to
-  "compare these PDFs" and you get prose with no traceable link to source text — unusable in
-  front of a regulator, an internal auditor, or a board risk committee, because a claim you
-  cannot locate in the source is a claim you cannot defend.
-
-### For whom
+## Who it's for
 
 | Audience | What they get |
 | --- | --- |
-| **Compliance analysts and regulatory-change teams** at regulated institutions | A first-pass thematic comparison with citations already verified, so the read is review rather than discovery |
-| **MLROs and heads of compliance** signing off on impact assessments | An evidence package where every material finding resolves to a page or line in the source, and their own disposition is part of the record |
-| **Second-line risk and internal audit** | A reproducible artifact: same inputs and same decisions produce the same run directory, so a conclusion can be re-derived months later |
-| **Advisors and external counsel** running impact assessments for clients | A defensible working paper rather than a chat transcript |
+| Compliance analysts and regulatory-change teams | A first-pass thematic comparison with citations already verified, so their job is review rather than discovery |
+| MLROs and heads of compliance | An evidence package where every finding resolves to a page or line, with their own decisions recorded alongside |
+| Second-line risk and internal audit | A reproducible artifact — the same inputs and decisions rebuild the same run directory months later |
+| Advisors and external counsel | A defensible working paper instead of a chat transcript |
 
-The common thread: people whose output has to survive being questioned. The tool is built for
-the moment *after* the analysis, when someone asks "where does it say that?"
+The common thread is people whose output has to survive being questioned. This is built for the
+moment someone asks "where does it say that?"
 
-### The measurable outcome
+## How a run works
 
-Every run emits its own instrumentation into the `coverage` block of `analysis.json` and the
-records under `audit/`. These are the numbers the tool is held to — not marketing claims, but
-fields you can read off a completed run:
+1. **Ingest** two local documents (`.pdf`, `.md`, `.txt`) and normalize them into records that keep
+   page and line locators.
+2. **Map themes** — a mapper subagent proposes a ranked list of themes the pair covers.
+3. **You approve the plan.** Nothing is spent on analysis until you do. You can approve, amend or
+   reject. An amendment is re-mapped into a second plan that also needs approval; reviewers never
+   hand-edit theme structures or record IDs.
+4. **Compare each theme** — every approved theme gets its own subagent with its own context.
+5. **Audit the evidence** — citations are checked against the stored source. Unverifiable claims
+   are dropped, not softened.
+6. **You disposition the findings** — every `critical` and `high` action candidate.
+7. **Publish** `analysis.json` (canonical) and `report.md` (for readers), then keep answering
+   questions about the result.
+
+Everything needed to audit the outcome — sources, context packets, worker results, rejected
+findings, your decisions, model provenance and logs — lands in one self-contained run directory.
+**The run is the evidence package.**
+
+## What you can measure
+
+Each run writes its own instrumentation into the `coverage` block of `analysis.json` and the files
+under `audit/`. These are readable off a finished run, not marketing claims:
 
 | Measure | Field | Target |
 | --- | --- | --- |
-| Findings whose every citation resolves to stored source text | `coverage.verified_finding_ratio` | **1.0** — enforced, not aspired to; a finding with an unverifiable citation cannot reach `analysis.json` |
-| Approved themes that produced a defensible result | `coverage.theme_outcome_ratio` | 1.0 for a `complete` run; anything less forces an explicit partial-finalization decision |
-| Source actually examined, not sampled away | `coverage.ingestion_page_ratio`, `mapper_heading_ratio`, `mapper_body_sample_ratio` | Reported per run so truncation is visible rather than silent |
-| Claims the model made that the audit threw out | count in `audit/rejected-findings-1.json` | Recorded every run — a rising rejection rate is a signal about the model, and it is measured rather than guessed |
-| Known concepts a fixture comparison must surface | `coverage.fixture_required_concept_ratio` | Asserted in the sanity suite, so regressions in analytical quality fail a test instead of reaching a reviewer |
+| Findings whose citations all resolve to stored source | `coverage.verified_finding_ratio` | **1.0**, enforced — an unverifiable citation cannot reach `analysis.json` |
+| Approved themes that produced a defensible result | `coverage.theme_outcome_ratio` | 1.0 for a complete run; less forces an explicit partial-finalization decision |
+| How much source was actually examined | `coverage.ingestion_page_ratio`, `mapper_body_sample_ratio` | Reported per run, so truncation is visible instead of silent |
+| Claims the audit threw out | count in `audit/rejected-findings-1.json` | Recorded every run — a rising rate is a signal about the model |
 
-Two outcomes are not captured in a field and should be stated honestly as the intent behind the
-design rather than as measured results:
+Two things worth stating as intent rather than measurement:
 
-- **Reviewer attention is concentrated, not replaced.** A human dispositions every `critical`
-  and `high` action candidate — a bounded list — instead of reading two full documents. The
-  gate is mandatory; the savings come from narrowing what needs judgment, not from removing it.
-- **Turnaround moves from days to a working session.** Ingestion, theme mapping, and per-theme
-  comparison are minutes of machine time. The wall-clock figure for your documents depends on
-  their size and your model; measure it on your own corpus before quoting it to anyone.
+- **Reviewer attention is concentrated, not replaced.** You disposition a bounded list of serious
+  findings instead of reading two full documents. The gate is mandatory; the saving comes from
+  narrowing what needs judgement.
+- **Turnaround moves from days to a working session.** Machine time is minutes, but the real figure
+  depends on your documents and model. Measure it on your own corpus before quoting it.
 
-What the tool deliberately does *not* optimize for is finding count. More findings is not a
-better run; a finding that survives citation audit is worth more than ten that do not.
+The tool does not optimise for finding count. One finding that survives the citation audit is worth
+more than ten that don't.
 
-Under the conversation, a bounded workflow runs:
+## Four profiles
 
-1. **Ingest** two local documents (`.pdf`, `.md`, `.txt`) and normalize them into records that
-   keep page or line locators.
-2. **Map themes** — a mapper subagent proposes a ranked catalogue of regulatory themes covered
-   by the pair.
-3. **Human gate #1** — you approve, amend, or reject that plan before any analysis spend. An
-   amendment is remapped into a second derived plan, which must be approved in turn; reviewers
-   never directly edit theme structures, record IDs, or plan hashes.
-4. **Compare per theme** — each approved theme gets its own subagent with its own context,
-   examining how both documents treat it.
-5. **Audit the evidence** — every finding's citations are mechanically verified against the
-   stored source text. Unverifiable claims are rejected, not softened.
-6. **Human gate #2** — you disposition every `critical` and `high` action candidate.
-7. **Publish** `analysis.json` (canonical) and `report.md` (reviewer-facing), then keep talking
-   about the result.
-
-Everything needed to audit the result — sources, coordinator-built packets, structured worker
-attempt results and outcomes, rejected findings, review decisions, model provenance, logs — is
-written to a self-contained run directory. The run *is* the evidence package.
-
-### Four comparison profiles
-
-One engine, one result schema, four analysis semantics:
+One engine and one result schema, four sets of analysis semantics:
 
 | Profile | Compares | Answers |
 | --- | --- | --- |
-| `consultation-impact` | current rule vs. a regulator consultation paper | what would this proposal cost us? |
+| `consultation-impact` | current rule vs. a consultation paper | what would this proposal cost us? |
 | `version-change` | earlier vs. later version of an instrument | what materially changed? |
-| `cross-guidance` | two guidance documents on one topic | do they align, differ in scope, or conflict? |
-| `policy-gap` | external requirement vs. our public policy posture | where are the gaps? |
+| `cross-guidance` | two guidance documents on one topic | do they align, differ, or conflict? |
+| `policy-gap` | external requirement vs. our policy posture | where are the gaps? |
 
-You do not have to name the profile. The shell agent infers it from what you asked and tells you
-which one it picked; you can override it in the same sentence or at the plan gate.
+You don't have to name the profile. The shell infers it and tells you which it picked, so you can
+correct it in the same sentence or at the plan gate.
 
-### The non-negotiables
+## The guarantees
 
 These are what separate this from a chat prompt, and they are release gates:
 
-- **Every material finding cites exact, verifiable source text.** The model supplies only the
-  record range; the harness quotes the source itself from that span, so a citation cannot misquote
-  what it cites. A range that does not resolve, or that is too broad to be evidence, is rejected
-  and cannot reach `analysis.json` or `report.md`.
-- **A human approves the scope, and a human dispositions the consequences.** Two mandatory
-  gates, enforced in the graph rather than in a prompt: the model cannot reach a finalized run
-  without passing through both. Non-interactive approval exists only for automated fixtures and
-  is marked as such in the record.
-- **The conversation is not the record.** Chat is the interface; the run directory is the
-  evidence. Nothing a reviewer signs off on lives only in a transcript, and nothing said in
-  conversation changes an artifact that has already been written.
-- **The model chooses what to analyze; it never decides what counts as verified.** Its only
-  tools are harness verbs, each of which validates before it writes. It can pick sources,
-  profile and themes; it cannot admit an unverified citation, skip a gate, or edit a finalized
-  artifact.
-- **Code execution is scoped.** A QuickJS REPL with allowlisted artifact read/write/list
-  operations — no shell, no processes, no host filesystem, no network. Every program and result
-  is logged.
+- **Every finding quotes real source text.** The model supplies only a record range; the harness
+  pulls the quotation from that span itself. A citation therefore cannot misquote what it cites. A
+  range that doesn't resolve, or is too broad to be evidence, is rejected.
+- **A human approves the scope, and a human accepts the consequences.** Both gates are enforced in
+  the workflow graph, not by a prompt. Non-interactive approval exists only for automated fixtures
+  and is marked as such.
+- **The conversation is not the record.** Chat is the interface; the run directory is the evidence.
+  Nothing you sign off lives only in a transcript, and nothing said in chat rewrites an artifact
+  already written.
+- **The model chooses what to analyse, never what counts as verified.** Its only tools are harness
+  verbs that validate before they write. It can pick sources, profile and themes; it cannot admit
+  an unverified citation, skip a gate, or edit a finalized artifact.
+- **Code execution is scoped.** A QuickJS sandbox with allowlisted artifact operations — no shell,
+  processes, host filesystem or network — capped at 1 second and 32 MB. Every program and result is
+  logged.
 
+## Why it's built this way
 
+This is a Deep Agents capstone. The regulatory use case is real, and it was chosen because getting
+these four things wrong is immediately visible:
 
----
-
-## Why it's shaped this way
-
-This is a Deep Agents capstone. The regulatory use case is real, but the architecture is
-deliberately built to exercise four capabilities under conditions where getting them wrong is
-visible:
-
-| Capability | How it shows up here |
+| Capability | How it shows up |
 | --- | --- |
-| Planning + human-in-the-loop | Graph-level interrupts and durable review records: plan review before spend, finding dispositions before publication |
-| Subagent delegation | One mapper, then N in-process DeepAgents theme workers, each with a bounded context packet |
-| Filesystem context offloading | The run workspace is the durable evidence package; workers see only `/input/packet.json` in disposable scratch storage |
-| Code execution | Scoped QuickJS, exposed to theme workers as a brokered tool for bounded local computation |
+| Planning + human-in-the-loop | Graph-level interrupts and durable review records |
+| Subagent delegation | One mapper, then N theme workers, each with a bounded context packet |
+| Filesystem context offloading | The run workspace is the evidence package; workers see only `/input/packet.json` |
+| Code execution | Scoped QuickJS, offered to theme workers for bounded local computation |
 
-Compliance work is a good forcing function: hallucinated findings are not a cosmetic flaw, they
-are the whole failure mode. That is why the evidence contract is mechanical rather than a prompt
-instruction.
+Compliance is a good forcing function: a hallucinated finding isn't a cosmetic flaw, it's the whole
+failure mode. That's why the evidence contract is mechanical rather than an instruction in a prompt.
 
-## Stack and architecture
+## Architecture
 
 Four layers:
 
-- **Shell agent — [deepagents](https://www.npmjs.com/package/deepagents) on LangGraph.** Turns
-  natural language into harness verbs. Owns the conversation, resolves intent, explains results.
-  Its tools are the only way it can affect anything.
-- **Coordinator — TypeScript.** Everything that must be reproducible: the workflow state
-  machine, normalization, zod validation, citation verification, retry policy, budgets,
-  materiality gating, report rendering. Sole writer of durable artifacts.
-- **Semantic delegates — deepagents subagents.** The mapper and the per-theme comparison
-  workers. Isolated context, no shell or network tools, results returned as JSON that is schema-
-  validated before it reaches the coordinator.
-- **Reasoning engine — an open model via OpenRouter.** Drives both the shell loop and the
-  delegates. Configured by environment, pinned for reproducibility, recorded per run.
+- **Shell agent** — [deepagents](https://www.npmjs.com/package/deepagents) on LangGraph. Turns
+  natural language into harness verbs, owns the conversation, explains results. Its tools are the
+  only way it can affect anything.
+- **Coordinator** — TypeScript. Everything that must be reproducible: the state machine,
+  normalization, schema validation, citation verification, budgets, materiality gating, report
+  rendering. The only writer of durable artifacts.
+- **Semantic delegates** — the mapper and the per-theme workers. Isolated context, no shell or
+  network, results returned as JSON that is schema-validated before the coordinator accepts it.
+- **Model** — any OpenAI-compatible endpoint. Drives both the shell and the delegates. Configured
+  by environment, pinned for reproducibility, recorded per run.
 
 ```text
                     +---------------------------------------------+
@@ -182,15 +162,15 @@ Four layers:
 |  resolves intent, picks profile + sources, explains results          |
 |  tools: inspect_sources  start_run   create_plan   submit_plan       |
 |         analyze_themes   finalize_run  inspect_run  validate_run     |
-|         read_findings                                                 |
-|  interrupts on: submit_plan, finalize_run; MemorySaver is session-only |
+|         read_findings                                                |
+|  interrupts on: submit_plan, finalize_run                            |
 +----------------------------------+-----------------------------------+
                                    |  every tool call
                                    v
 +----------------------------------------------------------------------+
 |  COORDINATOR                       TypeScript - deterministic        |
 |                                                                      |
-|  workflow state machine  |  zod schema validation  |  retry policy   |
+|  workflow state machine  |  schema validation      |  retry policy   |
 |  citation verification   |  materiality gating     |  report render  |
 |  call budgets            |  model provenance       |  event ledger   |
 |                                                                      |
@@ -215,7 +195,7 @@ Four layers:
       |  every semantic call
       v
 +--------------------------------+
-|   OpenRouter -> open model     |
+|   OpenAI-compatible endpoint   |
 |        << LLM BRAIN >>         |
 |                                |
 |  drives the shell loop and     |
@@ -228,76 +208,67 @@ Four layers:
                 +--------->  back to COORDINATOR
 ```
 
-### A note on worker isolation
+### How workers are isolated
 
-Earlier builds ran each theme worker as a separate sandboxed OS process with network egress
-denied. Subagents give up that boundary, and the README should say so plainly. What replaces it:
+Earlier builds ran each theme worker as a separate sandboxed OS process with no network. Subagents
+give that boundary up, so here is what replaces it:
 
-- Each delegate gets its own context — source text never enters the shell agent's conversation.
-- Delegates hold no shell, network, or host-filesystem tools; the only capability they have
-  beyond reading their context packet is the scoped QuickJS bridge.
-- That packet lives in a per-delegate temporary directory, and the read is scoped to it by an
-  allow rule ahead of a deny-everything rule. `FilesystemBackend` addresses **real** filesystem
-  paths rather than a chroot, so the permission globs, the prompt, and the backend are all built
-  from the same canonicalized (`realpath`) scratch directory. A virtual-looking path such as
-  `/input/packet.json` is not scoped to the sandbox — it resolves against the host root.
-- The delegate's backend runs in `virtualMode`, so `rootDir` is a genuine virtual root: the
-  delegate addresses `/input/packet.json`, traversal (`..`, `~`) and absolute escapes are refused
-  by the backend, and the permission globs match the namespace the delegate is told about. Without
-  it `rootDir` is only a cwd for relative paths and an absolute path resolves against the host root.
-- The QuickJS broker's Unix socket lives in its own short-named directory, not under the delegate
-  scratch path. A socket path is capped by `sockaddr_un.sun_path` (104 bytes on macOS, 108 on
-  Linux), and a scratch-relative path exceeded it — `listen()` bound nothing and the broker could
-  not start. Scripts are passed to the broker in memory and never written to disk.
-- A delegate's result crosses back into the coordinator **only** as a JSON object that is zod-
-  validated and citation-audited. It is never spliced into the shell agent's message history as
-  free text.
+- Each delegate has its own context. Source text never enters the shell agent's conversation.
+- Delegates get no shell, network or host-filesystem tools. Beyond reading their context packet,
+  their only capability is the scoped QuickJS bridge.
+- The packet lives in a per-delegate temporary directory. The backend runs in `virtualMode`, which
+  makes that directory a real virtual root: the delegate addresses `/input/packet.json`, traversal
+  (`..`, `~`) and absolute escapes are refused by the backend, and the permission rules match the
+  same namespace the delegate is told about. Without it, `rootDir` is only a working directory for
+  relative paths and an absolute path escapes to the host root.
+- The QuickJS socket lives in its own short-named directory rather than under the delegate's
+  scratch path, because a socket path is capped at 104 bytes on macOS (108 on Linux) and a
+  scratch-relative path exceeded it. Scripts reach the sandbox in memory and are never written to
+  disk.
+- A delegate's result re-enters the coordinator only as JSON that is schema-validated and
+  citation-audited. It is never spliced into the shell's message history as free text.
 
-That last point is the one that matters: source documents are treated as hostile input, and
-prompt injection in a PDF must not reach the agent that holds `finalize_run`. The shell’s source
-discovery tool returns only path, type, and size metadata; source ingestion and packet construction
-stay in TypeScript.
+That last point is the one that matters. Source documents are treated as hostile input: prompt
+injection inside a PDF must never reach the agent holding `finalize_run`. The shell's discovery tool
+returns only path, type and size; ingestion and packet building stay in TypeScript.
 
-The shell uses `MemorySaver` only for the live conversation. It is not a run-resume database. The
-immutable workspace ledger and its validated state projection remain authoritative, and the
-coordinator holds a workspace lock only while executing one staged operation—not while a reviewer
-is deciding at a gate.
+The shell keeps conversation state in memory only. It is not a resume database — the immutable
+ledger and its validated state projection are authoritative. The coordinator holds a workspace lock
+only while executing one step, never while you're deciding at a gate.
 
-Supporting: `pdfjs-dist` for PDF extraction with page boundaries, `quickjs-emscripten` for the
-scoped REPL, `@langchain/openai` for the OpenRouter adapter, `commander` for the CLI.
+Supporting libraries: `pdfjs-dist` for PDF extraction with page boundaries, `quickjs-emscripten` for
+the sandbox, `@langchain/openai` for the model adapter, `commander` for the CLI.
 
-Fixtures are real, public, English-language UAE sources — primarily CBUAE AML/CFT material —
-pinned by URL, publication metadata, and SHA-256 so tests never hit the network.
+Fixtures are real, public UAE sources — mostly CBUAE AML/CFT material — pinned by URL, publication
+metadata and SHA-256, so tests never hit the network.
 
-Tests run at three non-networked levels: deterministic unit tests for isolation, ledger, routing,
-review, citation, and QuickJS contracts; integration tests for CLI and workflow boundaries; and
-local sanity/fixture checks. An explicitly configured real-model regression is a separate manual
-operation and validates invariants (schema, citations, coverage, materiality, audit records)
-rather than snapshotting model prose.
+Tests run at three offline levels: unit tests for isolation, ledger, routing, review, citation and
+QuickJS behaviour; integration tests for CLI and workflow boundaries; and local fixture checks. A
+real-model regression is a separate manual step that checks invariants rather than snapshotting
+model prose.
 
-## Interface
+## Using it
 
-Conversational — the default with no subcommand. `npm start` is the supported launcher: it runs
-the CLI through `tsx --env-file=.env`, so your credentials load automatically.
+Conversational is the default. `npm start` runs the CLI through `tsx --env-file=.env`, so your
+credentials load automatically.
 
 ![The Clausewise conversational shell: npm start renders the CLAUSEWISE banner, then a reg-compare prompt comparing the 2021 and 2022 CBUAE STR guidance PDFs](./docs/images/shell-session.png)
 
-Naming the files is optional — `inspect_sources` resolves a plain-language request such as
-`compare the 2021 and 2022 CBUAE STR guidance` against the fixture cache, and the shell tells
-you which pair and profile it picked so you can correct it before the plan gate. Follow-up
-questions run against the finished run:
+Naming files is optional. `inspect_sources` resolves a request like `compare the 2021 and 2022
+CBUAE STR guidance` against the fixture cache, and the shell tells you which pair and profile it
+chose. Follow-up questions run against the finished run:
 
 ```console
 reg-compare> why is thm-002 only medium materiality?
 reg-compare> show me the evidence for f-003
 ```
 
-Scripted — unchanged, for CI and fixtures:
+Scripted, for CI and fixtures:
 
 ```bash
-reg-compare doctor                      # local preflight: node, npm, QuickJS
+npm start -- doctor                     # local preflight: node, npm, QuickJS
 
-reg-compare run \
+npm start -- run \
   --profile consultation-impact \
   --baseline ./documents/current-aml-guidance.pdf \
   --candidate ./documents/proposed-rule.pdf \
@@ -305,35 +276,47 @@ reg-compare run \
   --output ./runs/aml-consultation \
   --auto-approve
 
-reg-compare resume   --run ./runs/aml-consultation   # continue at the gate it stopped on
-reg-compare validate --run ./runs/aml-consultation   # re-check a run, no model calls
-reg-compare inspect  --run ./runs/aml-consultation   # summarize a run
+npm start -- resume   --run ./runs/aml-consultation   # continue from the gate it stopped on
+npm start -- validate --run ./runs/aml-consultation   # re-check a run, no model calls
+npm start -- inspect  --run ./runs/aml-consultation   # summarize a run
 ```
 
-Both paths use the same durable schema, ledger, and validation rules. Timestamps and generated
-run IDs intentionally prevent byte-for-byte identity across independently started runs. A run
-started in conversation can be inspected, validated, or continued with the scripted commands.
+Both paths share the same schema, ledger and validation rules. Timestamps and generated run IDs
+deliberately prevent byte-identical runs. A run started in conversation can be inspected, validated
+or continued with the scripted commands.
 
 ## Configuration
 
-Create a local `.env` with your key and routing settings. `npm start` loads it; `.env` is gitignored.
+Copy `.env.example` to `.env` and fill it in. `npm start` loads it; `.env` is gitignored.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-v1-...              # or REG_COMPARE_API_KEY
-REG_COMPARE_PROVIDER_ORDER=GMICloud          # required pinned OpenRouter route
+REG_COMPARE_PROVIDER_ORDER=GMICloud          # required; the route recorded as run provenance
 REG_COMPARE_MODEL=minimax/minimax-m3:free    # optional; code default is deepseek/deepseek-chat
-REG_COMPARE_BASE_URL=https://openrouter.ai/api/v1  # optional OpenAI-compatible endpoint
+REG_COMPARE_BASE_URL=https://openrouter.ai/api/v1  # optional; any OpenAI-compatible endpoint
 ```
 
-Invoking the CLI any other way (`npx tsx src/cli.ts`, or the built `dist/cli.js`) does **not**
-read `.env` — nothing in `src/` calls a dotenv loader. Pass `--env-file=.env` yourself, or
-export the variables.
+Any OpenAI-compatible endpoint works. For Groq, for example:
 
-**`REG_COMPARE_PROVIDER_ORDER` must name a provider that actually serves your chosen model.**
-Runs pin `allow_fallbacks: false` for reproducibility, so a provider that does not serve the
-model leaves zero endpoints and every request 404s with `No endpoints found`. The provider slug
-is not the vendor name — `deepseek/deepseek-chat` is served by `DeepInfra` and `StreamLake`, not
-by a provider called `DeepSeek`. List the real routes before pinning:
+```bash
+REG_COMPARE_API_KEY=gsk_...
+REG_COMPARE_BASE_URL=https://api.groq.com/openai/v1
+REG_COMPARE_MODEL=openai/gpt-oss-20b
+REG_COMPARE_PROVIDER_ORDER=groq
+```
+
+`REG_COMPARE_PROVIDER_ORDER` is always required, because it is recorded as run provenance. It is
+only sent as routing when the base URL is OpenRouter.
+
+Running the CLI any other way (`npx tsx src/cli.ts`, or the built `dist/cli.js`) does **not** read
+`.env` — nothing in `src/` loads dotenv. Pass `--env-file=.env` yourself, or export the variables.
+
+### Picking a provider route
+
+On OpenRouter, runs pin `allow_fallbacks: false` for reproducibility, so the provider you name must
+actually serve your model — otherwise there are zero endpoints and every request 404s with
+`No endpoints found`. The provider slug is not the vendor name: `deepseek/deepseek-chat` is served
+by `DeepInfra` and `StreamLake`, not by anything called `DeepSeek`. List the real routes first:
 
 ```bash
 curl -s "https://openrouter.ai/api/v1/models/<author>/<slug>/endpoints" \
@@ -342,94 +325,76 @@ curl -s "https://openrouter.ai/api/v1/models/<author>/<slug>/endpoints" \
 
 ### Free-tier accounts
 
-The shell and every worker require tool calling. OpenRouter catalog availability changes, so do
-not hardcode a free-model list: the authenticated catalog query during this session returned 431
-text models, 22 zero-cost text models, and 17 zero-cost models advertising both `tools` and
-`tool_choice`. The configured `minimax/minimax-m3:free` route resolves to GMICloud and currently
-advertises both capabilities with a 1M-token context window. Run the catalog query again before
-changing model or provider routing.
+The shell and every worker need tool calling, so check that first. Catalog availability changes, so
+re-query rather than trusting a hardcoded list. Errors worth recognising:
 
-A `:free` variant has zero token price but still has account and rate-limit constraints. Two
-failure modes worth recognizing:
+- **402, "requires more credits, or fewer max_tokens"** — the key can't afford the request. The
+  harness doesn't set `max_tokens`; the client and provider choose the default completion cap.
+- **404, "This model is unavailable for free"** — that free variant is retired. Re-query the
+  catalog instead of assuming the paid replacement is reachable.
+- **429 rate limits** — either the model is rate-limited upstream, or you've hit a per-minute token
+  cap. Groq's free tier, for instance, allows 8,000 tokens per minute, which a large context packet
+  will exceed on its own.
 
-- **`402 ... requires more credits, or fewer max_tokens`** means the account/key does not have
-  sufficient available credit for that request. The harness does not set `max_tokens`; the model
-  and provider decide their own default completion cap. In the shell this surfaces as
-  `model_error` unless a typed harness stage can classify it further.
-- **`404 This model is unavailable for free`** means the selected free variant is unavailable or
-  retired. Re-query the catalog and endpoint list rather than assuming a paid replacement is
-  accessible to the key.
+`doctor --network` can report PASS in all of these: it probes the catalog endpoint, not a real
+completion, so it confirms neither affordability nor the specific model's route.
 
-`doctor --network` can still report PASS in both cases: it probes the catalog endpoint, not a
-completion or the selected model's endpoints, so it confirms neither request affordability nor
-model-specific route availability.
+`doctor` on its own checks Node, npm and QuickJS locally. Key and routing problems are reported but
+don't fail it, which keeps the test suite offline.
 
-`reg-compare doctor` checks Node, npm, and QuickJS locally. API-key and routing configuration
-are reported but do not make the local doctor fail; endpoint reachability is an explicit
-`doctor --network` check. This keeps the normal test suite non-networked.
-
-Before any external request, the model adapter requires a key and provider order. Every run
-records model ID, base URL, temperature `0`, provider order, `allow_fallbacks: false`, and
-`data_collection: "deny"` in `manifest.json`; the same routing object is forwarded to
-OpenRouter on provider requests.
+Every run records model ID, base URL, temperature `0`, provider order, `allow_fallbacks: false` and
+`data_collection: "deny"` in `manifest.json`.
 
 ### Budgets
 
-There are deliberately two distinct limits:
+Two separate limits:
 
 | Limit | Scope |
 | --- | --- |
-| `--agent-call-budget` (2–48) | External **analysis provider requests**, including mapper/worker tool loops and retries |
-| `LIMITS.maxShellModelCalls` (100) | In-memory shell-session requests; independent of any run and reset when the shell exits |
+| `--agent-call-budget` (2–48, default 24) | Analysis provider requests, including tool loops and retries |
+| `LIMITS.maxShellModelCalls` (100) | Shell-session requests, in memory, reset when the shell exits |
 
-Immediately before every mapper or worker chat-model request, a callback atomically reserves one
-analysis call. The reservation writes an immutable `model_call_started` ledger event with a state
-projection. `validate` reconciles those events against `run-state.json` and the configured budget,
-so retries cannot silently spend past the cap. A mapper and each theme worker have an independent
-three-request ceiling; the plan reserves a minimum of two remaining requests for every approved
-theme, preventing a mapper loop from consuming the entire run budget.
+Before every mapper or worker request, a callback reserves one analysis call and writes a
+`model_call_started` ledger event. `validate` reconciles those events against `run-state.json`, so
+retries can't quietly overspend.
 
-Note that a delegate is an agentic loop, not a single inference: reading the packet costs one
-request, answering costs another, and each structured-output repair costs one more. A
-three-request ceiling therefore leaves room for roughly one repair, and a delegate that needs an
-extra tool turn exhausts it. When it does, the delegate's outcome is `model_error`, which reads
-as model incapability even when the cause is the harness — check the attempt artifact before
-concluding the model is at fault.
+The mapper and each theme worker also have their own ceiling of six requests. Remember that a
+delegate is a loop, not one inference: reading the packet costs a request, answering costs another,
+and each structured-output repair costs one more. When a delegate runs out, its outcome is
+`model_error` — which reads like the model's fault even when it isn't, so check the attempt artifact
+before blaming it.
 
-### Diagnosing a failed delegate
+### When a delegate fails
 
-A failed mapper or worker attempt records the real reason, not just its outcome class:
+A failed attempt records the real reason, not just its outcome class:
 
 | File | Contents |
 | --- | --- |
-| `planning/mapper-attempt-<n>.json` | Outcome plus the underlying error in `stderr`, redacted and bounded by `LIMITS.workerErrorBytes` |
-| `planning/mapper-rejected-<n>.json` | The model output that was rejected, so a schema failure can be inspected |
-| `workers/<theme>/attempt-<n>.json` | The same for each theme worker |
+| `planning/mapper-attempt-<n>.json` | Outcome plus the underlying error in `stderr`, redacted and size-bounded |
+| `planning/mapper-rejected-<n>.json` | The model output that was rejected, so a schema failure is inspectable |
+| `workers/<theme>/attempt-<n>.json` | The same, per theme worker |
 | `logs/orchestrator.ndjson` | Stage-level operational log |
 
-Earlier builds deliberately stored no exception text; that made a genuine failure impossible to
-diagnose, and the decision was reversed. Credentials are redacted before anything is written.
+Earlier builds deliberately stored no exception text, which made real failures impossible to
+diagnose. That decision was reversed. Credentials are redacted before anything is written.
 
 ### Data classification
 
-`--data-classification internal` or `confidential` requires
-`--confirm-external-model-access`, acknowledging that document text is sent to the configured
-inference endpoint — OpenRouter and its selected upstream provider — whose retention terms are
-outside this tool's control. `confidential` additionally requires
-`--confirm-encrypted-workspace` and `--retention-until`. The consent assertion and routing
-provenance are retained in the immutable manifest. Review your provider's data policy before
-classifying anything above `public`.
+`--data-classification internal` or `confidential` requires `--confirm-external-model-access`,
+acknowledging that document text is sent to the configured endpoint, whose retention terms are
+outside this tool's control. `confidential` additionally requires `--confirm-encrypted-workspace`
+and `--retention-until`. The consent and routing provenance stay in the immutable manifest. Review
+your provider's data policy before classifying anything above `public`.
 
 ## Current state
 
 | | |
 | --- | --- |
-| Specification | [SPEC.md](./docs/SPEC.md) — approved build spec |
+| Specification | [SPEC.md](./docs/SPEC.md) |
 | Decision log | [DECISIONS.md](./docs/DECISIONS.md) |
-| Implementation | conversational harness operational; batch path at parity |
+| Implementation | Conversational path runs through ingestion, theme mapping and the plan gate. The analysis and publication stages have not yet been re-verified end to end on a live model since the citation change — recent attempts stopped on provider rate limits, not harness errors. |
 
-Technical spikes that gate "core complete" (SPEC §16): reliable structured output and multi-turn
-tool-calling from the configured model, QuickJS embedding without leaking Node capabilities, PDF
-page/quote stability good enough for exact citation verification, and public-source
-redistribution rights. If a spike fails, the rule is to stop at that boundary and revise the
-spec — not to quietly weaken the security or evidence guarantees.
+Spikes that gate "core complete" (SPEC §16): dependable structured output and multi-turn tool
+calling from the configured model, QuickJS embedding that leaks no Node capabilities, PDF page and
+quote stability good enough for exact citation checks, and public-source redistribution rights. If a
+spike fails, the rule is to stop and revise the spec — not to quietly weaken a guarantee.
