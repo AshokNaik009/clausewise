@@ -1,0 +1,1 @@
+{"schema_version":"1.0","run_id":"da284428-4911-4f8b-b9d2-58c2aef00c04","sequence":3,"type":"artifact_created","timestamp":"2026-09-06T07:43:36.147Z","actor":"coordinator","payload":{"artifact":"sources/raw/baseline.pdf"},"previous_event_sha256":"21da63c6be1d706adfac6dfacbfeae5539695a3c6084826a869c8a47a838c813"}

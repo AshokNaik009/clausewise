@@ -1,0 +1,30 @@
+[
+  {
+    "document_id": "baseline",
+    "page_count": 46,
+    "record_count": 1904,
+    "canonical_character_count": 139110,
+    "textual_page_count": 46,
+    "textual_page_ratio": 1,
+    "script_ratios": {
+      "latin": 1,
+      "arabic": 0
+    },
+    "extraction_order": "parser-page-order",
+    "quality_gate": "accepted"
+  },
+  {
+    "document_id": "candidate",
+    "page_count": 46,
+    "record_count": 1902,
+    "canonical_character_count": 138033,
+    "textual_page_count": 45,
+    "textual_page_ratio": 0.9782608695652174,
+    "script_ratios": {
+      "latin": 1,
+      "arabic": 0
+    },
+    "extraction_order": "parser-page-order",
+    "quality_gate": "accepted"
+  }
+]

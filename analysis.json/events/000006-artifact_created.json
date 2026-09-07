@@ -1,0 +1,1 @@
+{"schema_version":"1.0","run_id":"da284428-4911-4f8b-b9d2-58c2aef00c04","sequence":6,"type":"artifact_created","timestamp":"2026-09-06T07:43:36.231Z","actor":"coordinator","payload":{"artifact":"sources/normalized/candidate.json"},"previous_event_sha256":"e0a1c87942c2ced1a5a8796caef2af664493151a7fabc463b7032991f18e1168"}
