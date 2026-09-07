@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { executeQuickJs } from "../../src/quickjs.js";
+import { executeQuickJs, invokeQuickJsScript, startQuickJsBroker } from "../../src/quickjs.js";
 import { createWorkspace } from "../../src/workspace.js";
 
 const temporaryPaths: string[] = [];
@@ -46,5 +46,32 @@ describe("QuickJS capability bridge", () => {
     }, {
       capability: "capability", callerRole: "theme_worker", themeId: "thm-001-cdd", allowedReads: {}, allowedWrites: [],
     })).rejects.toMatchObject({ code: "quickjs_read_denied" });
+  });
+});
+
+describe("QuickJS broker socket path", () => {
+  it("starts from a deeply nested scratch directory and runs an in-memory script", async () => {
+    const runWorkspace = await workspace();
+    // Reproduces the real failure: a delegate scratch directory under the OS temp root produced a
+    // socket path of ~130 bytes, past the platform sockaddr_un limit (104 on macOS). listen() then
+    // bound nothing and the follow-up chmod failed with ENOENT, so no theme worker could start.
+    const scratch = await mkdtemp(join(tmpdir(), "reg-compare-worker-"));
+    temporaryPaths.push(scratch);
+    const broker = await startQuickJsBroker(runWorkspace, scratch, {
+      callerRole: "theme_worker",
+      themeId: "thm-001-example",
+      allowedReads: { "input/packet.json": JSON.stringify({ records: [1, 2, 3] }) },
+      allowedWrites: [],
+    });
+    try {
+      expect(Buffer.byteLength(broker.socketPath, "utf8")).toBeLessThanOrEqual(100);
+      const result = await invokeQuickJsScript(broker.socketPath, broker.capabilityFile, "theme_worker",
+        "const packet = JSON.parse(readArtifact('input/packet.json')); packet.records.length;",
+        ["input/packet.json"], []) as { result?: unknown; error?: unknown };
+      expect(result.error ?? null).toBeNull();
+      expect(result.result).toBe(3);
+    } finally {
+      await broker.close();
+    }
   });
 });

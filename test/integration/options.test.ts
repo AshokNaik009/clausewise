@@ -6,7 +6,7 @@ describe("run option controls", () => {
 
   it("applies the documented defaults", () => {
     const input = parseRunInput(base);
-    expect(input).toMatchObject({ maxThemes: 6, concurrency: 2, agentCallBudget: 9, agentTimeoutSeconds: 300, maxSourcePages: 350, maxSourceChars: 2_500_000, dataClassification: "public" });
+    expect(input).toMatchObject({ maxThemes: 6, concurrency: 2, agentCallBudget: 24, agentTimeoutSeconds: 300, maxSourcePages: 350, maxSourceChars: 2_500_000, dataClassification: "public" });
   });
 
   it("rejects unsafe approval and classification combinations", () => {

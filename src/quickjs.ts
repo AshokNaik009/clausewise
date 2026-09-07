@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, readFile, unlink } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server } from "node:net";
+import { tmpdir } from "node:os";
 import { join, normalize, relative } from "node:path";
 import { getQuickJS } from "quickjs-emscripten";
 import { LIMITS } from "./constants.js";
@@ -189,20 +190,42 @@ function readOneMessage(socketPath: string, message: string): Promise<string> {
   });
 }
 
-async function closeServer(server: Server, socketPath: string): Promise<void> {
+async function closeServer(server: Server, socketPath: string, socketDirectory: string): Promise<void> {
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   await unlink(socketPath).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;
   });
+  await rm(socketDirectory, { recursive: true, force: true });
+}
+
+// A Unix domain socket path is capped by the platform's sockaddr_un.sun_path — 104 bytes on
+// macOS/BSD, 108 on Linux. The delegate scratch directory sits under a long tmpdir (48 bytes on
+// macOS before any name), so a socket placed there silently exceeded the cap: listen() bound
+// nothing at that path and the follow-up chmod failed with ENOENT. The socket therefore gets its
+// own short-named directory, kept well inside the limit and independent of the scratch lifetime.
+const maxSocketPathBytes = 100;
+
+async function createSocketDirectory(): Promise<string> {
+  const base = process.platform === "darwin" ? "/tmp" : tmpdir();
+  const directory = await mkdtemp(join(base, "rcq-"));
+  await chmod(directory, 0o700);
+  return directory;
 }
 
 export async function startQuickJsBroker(workspace: Workspace, scratchDirectory: string, capabilities: Omit<QuickJsCapabilities, "capability">): Promise<QuickJsBroker> {
   const nonce = randomBytes(32).toString("hex");
-  const socketPath = join(scratchDirectory, `quickjs-${randomUUID()}.sock`);
+  const socketDirectory = await createSocketDirectory();
+  const socketPath = join(socketDirectory, "b.sock");
+  if (Buffer.byteLength(socketPath, "utf8") > maxSocketPathBytes) {
+    throw new RegCompareError("quickjs_socket_path", `The QuickJS broker socket path exceeds ${maxSocketPathBytes} bytes: ${socketPath}`, 5);
+  }
   const capabilityFile = join(scratchDirectory, `quickjs-${randomUUID()}.cap`);
   await writePrivateFile(capabilityFile, `${nonce}\n`);
   const fullCapabilities: QuickJsCapabilities = { ...capabilities, capability: nonce };
-  const server = createServer((socket) => {
+  // The client half-closes to signal end-of-request, so the server must keep its side open long
+  // enough to run the script and reply; without allowHalfOpen Node ends it on FIN and the caller
+  // sees an empty response.
+  const server = createServer({ allowHalfOpen: true }, (socket) => {
     let message = "";
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => {
@@ -226,11 +249,18 @@ export async function startQuickJsBroker(workspace: Workspace, scratchDirectory:
     server.listen(socketPath, () => resolve());
   });
   await chmod(socketPath, 0o600);
-  return { socketPath, capabilityFile, close: () => closeServer(server, socketPath) };
+  return { socketPath, capabilityFile, close: () => closeServer(server, socketPath, socketDirectory) };
+}
+
+// In-process callers hold the script in memory already. Spilling it to a temp file only to read
+// it straight back adds a filesystem dependency — and a lifetime the caller does not control —
+// to an operation that needs neither.
+export async function invokeQuickJsScript(socketPath: string, capabilityFile: string, callerRole: QuickJsCallerRole, script: string, requestedReads: string[] = [], requestedWrites: string[] = []): Promise<unknown> {
+  const capability = await readFile(capabilityFile, "utf8");
+  const response = await readOneMessage(socketPath, JSON.stringify({ capability: capability.trim(), caller_role: callerRole, script, requested_reads: requestedReads, requested_writes: requestedWrites }));
+  return JSON.parse(response);
 }
 
 export async function invokeQuickJsBridge(socketPath: string, capabilityFile: string, callerRole: QuickJsCallerRole, scriptPath: string, requestedReads: string[] = [], requestedWrites: string[] = []): Promise<unknown> {
-  const [capability, script] = await Promise.all([readFile(capabilityFile, "utf8"), readFile(scriptPath, "utf8")]);
-  const response = await readOneMessage(socketPath, JSON.stringify({ capability: capability.trim(), caller_role: callerRole, script, requested_reads: requestedReads, requested_writes: requestedWrites }));
-  return JSON.parse(response);
+  return invokeQuickJsScript(socketPath, capabilityFile, callerRole, await readFile(scriptPath, "utf8"), requestedReads, requestedWrites);
 }

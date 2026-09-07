@@ -1,0 +1,1 @@
+{"schema_version":"1.0","run_id":"da284428-4911-4f8b-b9d2-58c2aef00c04","sequence":7,"type":"artifact_created","timestamp":"2026-09-06T07:43:36.254Z","actor":"coordinator","payload":{"artifact":"sources/source-stats.json"},"previous_event_sha256":"31c78843f9496ae3236934d7499ef66ad5cc717cb2da340a379cbb8459c95dd0"}

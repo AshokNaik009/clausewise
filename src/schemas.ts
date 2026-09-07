@@ -47,7 +47,7 @@ export const runOptionsSchema = z.object({
   dataClassification: classificationSchema,
   maxThemes: z.number().int().min(1).max(6),
   concurrency: z.number().int().min(1).max(3),
-  agentCallBudget: z.number().int().min(2).max(14),
+  agentCallBudget: z.number().int().min(2).max(48),
   agentTimeoutSeconds: z.number().int().min(30).max(900),
   maxSourcePages: z.number().int().min(1).max(350),
   maxSourceChars: z.number().int().min(10_000).max(2_500_000),
@@ -86,10 +86,14 @@ export const citationClaimSchema = z.object({
   document_id: documentIdSchema,
   start_record_id: z.string().regex(/^(baseline|candidate):p\d{4}:l\d{6}$/),
   end_record_id: z.string().regex(/^(baseline|candidate):p\d{4}:l\d{6}$/),
-  excerpt: z.string().min(1).max(4_000),
+  // Model-supplied excerpts are a hint only. The harness derives the authoritative excerpt from
+  // the cited record span, so a citation cannot misquote its own source.
+  excerpt: z.string().max(4_000).optional(),
 }).strict();
 
 export const verifiedCitationSchema = citationClaimSchema.extend({
+  // Always present once verified: derived from the cited span, never from the model.
+  excerpt: z.string().min(1).max(4_000),
   page_start: z.number().int().positive().nullable(),
   page_end: z.number().int().positive().nullable(),
   global_line_start: z.number().int().positive(),
@@ -173,7 +177,10 @@ export const mapperProposalSchema = z.object({
     description: z.string().min(1).max(1_000),
     keywords: z.array(z.string().min(1).max(80)).min(1).max(12),
     ranking_rationale: z.string().min(1).max(1_000),
-    seed_record_ids: z.array(z.string().regex(/^(baseline|candidate):p\d{4}:l\d{6}$/)).min(1).max(20),
+    // Delegate-facing only: a weak model often emits unpadded page/line numbers. These are
+    // canonicalized and checked against real records in safeMapperProposals before they reach
+    // themePlanSchema, which stays strict.
+    seed_record_ids: z.array(z.string().min(1).max(64)).min(1).max(20),
   }).strict()).min(1).max(12),
 }).strict();
 

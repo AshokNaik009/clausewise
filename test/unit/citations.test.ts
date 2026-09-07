@@ -26,13 +26,27 @@ describe("citation audit", () => {
     expect(result).toMatchObject({ code: "record_not_found" });
   });
 
-  it("rejects an excerpt that is not already canonical", () => {
+  it("ignores a model-supplied excerpt and quotes the source itself", () => {
+    // The model transcribed the span with doubled spacing and a joining semicolon — the shape
+    // that previously failed exact matching and sank every finding in a real run.
+    const result = verifyCitation(new Map([["baseline", baseline]]), {
+      document_id: "baseline",
+      start_record_id: "baseline:p0000:l000001",
+      end_record_id: "baseline:p0000:l000002",
+      excerpt: "Customer  due diligence is required.; Records must be retained.",
+    });
+    expect("verified" in result && result.verified).toBe(true);
+    expect("excerpt" in result && result.excerpt).toBe("Customer due diligence is required.\nRecords must be retained.");
+  });
+
+  it("verifies a citation that supplies no excerpt at all", () => {
     const result = verifyCitation(new Map([["baseline", baseline]]), {
       document_id: "baseline",
       start_record_id: "baseline:p0000:l000001",
       end_record_id: "baseline:p0000:l000001",
-      excerpt: "Customer  due diligence",
     });
-    expect(result).toMatchObject({ code: "non_canonical_excerpt" });
+    expect("verified" in result && result.verified).toBe(true);
+    expect("excerpt" in result && result.excerpt).toBe("Customer due diligence is required.");
   });
+
 });

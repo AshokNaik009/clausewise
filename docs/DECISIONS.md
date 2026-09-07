@@ -42,8 +42,10 @@ The harness has four profiles with one common finding schema and typed profile-s
 
 - `--agent-call-budget` means external **provider requests**, not worker or subprocess count. A LangChain callback reserves budget immediately before each chat-model request, including tool loops and retries.
 - Every successful reservation writes a `model_call_started` immutable ledger event containing a state projection. The ledger validator rejects non-contiguous call numbers, invalid role/theme associations, or disagreement between events, state counters, and the configured budget.
+- A mapper and each theme worker are capped at three provider requests. Planning reserves two remaining requests per approved theme, preventing one malformed delegate loop from consuming the entire run budget.
 - The conversational shell has a separate in-memory ceiling of 100 model requests per session. It is deliberately not charged to a run's analysis budget and disappears when the shell exits.
-- Mapper and worker failures persist a schema-validated attempt artifact with an outcome (`ok`, `model_error`, `schema_invalid`, `timeout`, or `budget_exhausted`) without saving raw exception text. Worker retry and partial-finalization rules remain explicit.
+- Mapper and worker failures persist a schema-validated attempt artifact with an outcome (`ok`, `model_error`, `schema_invalid`, `timeout`, or `budget_exhausted`) **and a redacted, size-bounded diagnostic** in `stderr` (`LIMITS.workerErrorBytes`, `stderr_truncated` set when cut), plus the rejected model output alongside it. The earlier rule was to save no exception text; that made a real mapper failure undiagnosable, and diagnosis was worth more than the smaller artifact. Credentials are redacted before writing. Worker retry and partial-finalization rules remain explicit.
+- A delegate that returns schema-valid JSON as prose instead of a tool call is accepted. Weak free models routinely do this, and the value is validated against the identical schema either way, so rejecting it discarded correct work for a delivery-channel difference.
 
 ## Data handling and execution
 
@@ -65,3 +67,11 @@ The harness has four profiles with one common finding schema and typed profile-s
 - `--max-themes` defaults to `6`; `--concurrency` defaults to `2` and is capped at `3`.
 - Citations use short excerpts to avoid reproducing large portions of source documents.
 - Fixture sources are public, English-language UAE materials pinned by metadata and SHA-256. Ordinary tests do not download them.
+
+## Sandboxing and evidence (revised after the first live runs)
+
+- Delegate filesystem access uses `FilesystemBackend` in `virtualMode`. `rootDir` alone is only a cwd for relative paths, so an absolute path escapes to the host root and no permission glob written against a virtual namespace can match. Virtual mode makes the root real, refuses `..`/`~`, and lets the prompt, the permission rules and the backend name one namespace.
+- The harness derives every citation excerpt from the cited record span. Exact-matching a model-authored excerpt required reproducing the newline the harness inserts between records, which no model does reliably; deriving it makes the quotation correct by construction and leaves the locator as the only thing the model must get right.
+- Per-delegate provider-call ceilings are sized for an agent loop (read, optional tool call, answer, one repair), not a single inference. A ceiling of three had no slack and surfaced as `model_error`.
+- LangChain's `ModelRetryMiddleware` is used with `onFailure: "error"`. Upstream documents that on budget exhaustion its default hands back an `AIMessage` containing the error text, so a dead provider can end a turn disguised as a model answer; `onFailure: "error"` avoids that.
+

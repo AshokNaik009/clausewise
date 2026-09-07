@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "run_id": "da284428-4911-4f8b-b9d2-58c2aef00c04",
+  "created_at": "2026-09-06T07:43:36.100Z",
+  "profile": "cross-guidance",
+  "options": {
+    "profile": "cross-guidance",
+    "dataClassification": "public",
+    "maxThemes": 6,
+    "concurrency": 2,
+    "agentCallBudget": 24,
+    "agentTimeoutSeconds": 300,
+    "maxSourcePages": 350,
+    "maxSourceChars": 2500000,
+    "allowPartial": false,
+    "autoApprove": false,
+    "confirmExternalModelAccess": false,
+    "confirmEncryptedWorkspace": false,
+    "retentionUntil": null
+  },
+  "data_classification": "public",
+  "model": {
+    "model": "openai/gpt-oss-20b",
+    "base_url": "https://api.groq.com/openai/v1",
+    "temperature": 0,
+    "provider_order": [
+      "groq"
+    ],
+    "allow_fallbacks": false,
+    "data_collection": "deny"
+  },
+  "documents": [
+    {
+      "document_id": "baseline",
+      "display_name": "cbuae-str-guidance-2021-CBUAE_EN_418_VER1.pdf",
+      "format": "pdf",
+      "language": "en",
+      "raw_artifact_path": "sources/raw/baseline.pdf",
+      "normalized_artifact_path": "sources/normalized/baseline.json",
+      "sha256": "d9b50225157160a23e1c92c4b5535beaa2688fb411f0aaecedc633f6d5298ec2",
+      "page_count": 46,
+      "record_count": 1904,
+      "canonicalization_version": "canon-v1"
+    },
+    {
+      "document_id": "candidate",
+      "display_name": "cbuae-str-guidance-2022-CBUAE_EN_418_VER2.pdf",
+      "format": "pdf",
+      "language": "en",
+      "raw_artifact_path": "sources/raw/candidate.pdf",
+      "normalized_artifact_path": "sources/normalized/candidate.json",
+      "sha256": "5ca8b7b712e5bea66be4e7e95687eb664e2beed1b77485327b3293e0bceec2e0",
+      "page_count": 46,
+      "record_count": 1902,
+      "canonicalization_version": "canon-v1"
+    }
+  ],
+  "normalization_version": "canon-v1"
+}

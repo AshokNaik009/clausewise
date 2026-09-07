@@ -106,7 +106,7 @@ function progress(planRound: number) {
   };
 }
 
-async function workspace(state: "awaiting_plan_review" | "awaiting_final_review") {
+async function workspace(state: "awaiting_plan_review" | "awaiting_final_review", agentCallBudget = 2) {
   const parent = await mkdtemp(join(tmpdir(), "reg-compare-conversation-test-"));
   temporaryPaths.push(parent);
   const documents = ["baseline", "candidate"].map((documentId) => ({
@@ -129,7 +129,7 @@ async function workspace(state: "awaiting_plan_review" | "awaiting_final_review"
       dataClassification: "public",
       maxThemes: 1,
       concurrency: 1,
-      agentCallBudget: 2,
+      agentCallBudget,
       agentTimeoutSeconds: 30,
       maxSourcePages: 1,
       maxSourceChars: 10_000,
@@ -197,9 +197,9 @@ describe("conversational orchestration", () => {
       });
       return { value, process: { stdout: JSON.stringify(value), stderr: "", stderr_truncated: false, exit_code: 0, signal: null, duration_ms: 0, outcome: "ok" }, artifact };
     });
-    const run = await workspace("awaiting_plan_review");
+    const run = await workspace("awaiting_plan_review", 3);
     await expect(submitConversationPlan(run.root, "amended", "Focus on onboarding controls.")).resolves.toMatchObject({ decision: "amended", plan: { round: 2 } });
-    await expect(validateLedger(run)).resolves.toMatchObject({ state: "awaiting_plan_review", used_agent_calls: 1, remaining_agent_calls: 1 });
+    await expect(validateLedger(run)).resolves.toMatchObject({ state: "awaiting_plan_review", used_agent_calls: 1, remaining_agent_calls: 2 });
     await expect(validateRun(run)).resolves.toMatchObject({ valid: true, state: "awaiting_plan_review" });
     await expect(access(artifactPath(run, "lock"))).rejects.toMatchObject({ code: "ENOENT" });
   });

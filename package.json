@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",
     "start": "tsx --env-file=.env src/cli.ts",
+    "code": "tsx src/code/cli.ts",
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",
     "test:sanity": "tsx test/sanity.ts",
@@ -22,17 +23,22 @@
     "@langchain/langgraph-checkpoint": "1.1.5",
     "@langchain/langgraph-sdk": "1.9.23",
     "@langchain/openai": "1.5.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "commander": "13.1.0",
     "deepagents": "1.13.1",
     "figlet": "^1.11.4",
+    "ink": "6.8.0",
+    "ipaddr.js": "2.2.0",
     "langchain": "1.5.10",
     "langsmith": "0.9.0",
     "pdfjs-dist": "4.10.38",
     "quickjs-emscripten": "0.32.0",
+    "react": "19.2.0",
     "zod": "4.2.1"
   },
   "devDependencies": {
     "@types/node": "22.15.3",
+    "@types/react": "19.2.2",
     "tsx": "4.19.3",
     "typescript": "5.8.3",
     "vitest": "3.2.4"
@@ -40,6 +46,7 @@
   "type": "module",
   "private": true,
   "bin": {
+    "dcode-ts": "dist/code/cli.js",
     "reg-compare": "dist/cli.js"
   },
   "engines": {

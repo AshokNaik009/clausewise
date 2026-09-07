@@ -124,7 +124,7 @@ export function createHarnessTools(options: HarnessToolOptions = {}): DynamicStr
       data_classification: z.enum(["public", "internal", "confidential"]).default("public"),
       max_themes: z.number().int().min(1).max(6).default(6),
       concurrency: z.number().int().min(1).max(3).default(2),
-      agent_call_budget: z.number().int().min(2).max(14).default(9),
+      agent_call_budget: z.number().int().min(2).max(48).default(24),
       agent_timeout_seconds: z.number().int().min(30).max(900).default(300),
       allow_partial: z.boolean().default(false),
       confirm_external_model_access: z.boolean().default(false),

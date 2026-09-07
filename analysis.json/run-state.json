@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "run_id": "da284428-4911-4f8b-b9d2-58c2aef00c04",
+  "state": "mapping",
+  "updated_at": "2026-09-06T07:43:36.286Z",
+  "active_plan_path": null,
+  "active_review_stage": null,
+  "used_agent_calls": 0,
+  "remaining_agent_calls": 24,
+  "worker_statuses": {},
+  "final_artifact_paths": [],
+  "last_event_sequence": 9
+}
