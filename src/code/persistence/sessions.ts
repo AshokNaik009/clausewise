@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readdir, realpath, unlink } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath } from "node:fs/promises";
+import { acquireSessionLock, recoverSessionLock } from "./locks.js";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { RunnableConfig } from "@langchain/core/runnables";
 import { z } from "zod";
 import type { FileCheckpointer } from "./checkpointer.js";
 import { atomicJson, privateDirectory, readJson } from "./storage.js";
+import { settingSchema } from "../config/configuration.js";
 
 const idSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, "Invalid session ID");
 export const sessionSchema = z.object({
@@ -15,6 +17,9 @@ export const sessionSchema = z.object({
   model: z.string().min(1),
   baseUrl: z.string().optional(),
   provider: z.string().optional(),
+  title: z.string().min(1).max(200).optional(),
+  settings: settingSchema.optional(),
+  trace: z.object({ runId: z.string().uuid(), endpoint: z.string().url(), project: z.string() }).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
@@ -69,17 +74,28 @@ export class SessionStore {
     return sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
+  async createFromHistory(options: { cwd: string; model: string; baseUrl?: string; provider?: string }, messages: import("@langchain/core/messages").BaseMessage[], provenance: Record<string, unknown>): Promise<SessionInfo> {
+    const { emptyCheckpoint } = await import("@langchain/langgraph-checkpoint");
+    const info = await this.create(options);
+    await this.use(info.id, async ({ checkpointer, config, directory }) => {
+      const checkpoint = emptyCheckpoint();
+      checkpoint.channel_values = { messages };
+      checkpoint.channel_versions = { messages: 1 };
+      await checkpointer.put(config, checkpoint, { source: "update", step: 0, parents: {} });
+      await checkpointer.flush();
+      await atomicJson(join(directory!, "import.json"), { version: 1, createdAt: new Date().toISOString(), ...provenance });
+    });
+    return info;
+  }
+
+  async recoverLock(id: string) {
+    return recoverSessionLock(join(await this.sessionPath(id), "session.lock"));
+  }
+
   async use<T>(id: string, operation: (context: SessionContext) => Promise<T>): Promise<T> {
     const path = await this.sessionPath(id);
-    const lockPath = join(path, "session.lock");
-    const lock = await open(lockPath, "wx", 0o600).catch((error: unknown) => {
-      if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-        throw new Error(`Session is in use. If its process crashed, verify it has stopped before removing ${lockPath}`);
-      }
-      throw error;
-    });
+    const release = await acquireSessionLock(join(path, "session.lock"));
     try {
-      await lock.writeFile(JSON.stringify({ pid: process.pid }));
       const info = await this.get(id);
       const { FileCheckpointer } = await import("./checkpointer.js");
       const checkpointer = await FileCheckpointer.load(join(path, "checkpoint.json"), id);
@@ -94,9 +110,6 @@ export class SessionStore {
         await checkpointer.flush();
         await atomicJson(join(path, "session.json"), { ...info, updatedAt: new Date().toISOString() });
       }
-    } finally {
-      await lock.close();
-      await unlink(lockPath);
-    }
+    } finally { await release(); }
   }
 }

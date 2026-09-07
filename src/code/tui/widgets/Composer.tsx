@@ -1,35 +1,56 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { COMMANDS } from "../../cli/commands.js";
 import { terminalText } from "../../shared/output.js";
 
-export function Composer({ disabled, submit }: { disabled: boolean; submit: (value: string) => void }) {
-  const [value, setValue] = useState("");
-  const [cursor, setCursor] = useState(0);
+export function Composer({ disabled, submit, draft, onDraft, history = [], queued = false }: { disabled: boolean; submit: (value: string) => boolean; draft: { text: string; revision: number }; onDraft: (text: string) => void; history?: string[]; queued?: boolean }) {
+  const [value, setValue] = useState(draft.text);
+  const [cursor, setCursor] = useState(Array.from(draft.text).length);
+  const [recall, setRecall] = useState(-1);
+  const [saved, setSaved] = useState("");
+  const [completion, setCompletion] = useState(0);
   const chars = Array.from(value);
-  const matches = value.startsWith("/") && !value.includes(" ") ? COMMANDS.filter((entry) => entry.name.startsWith(value.slice(1))) : [];
+  const matches = value.startsWith("/") && !/\s/u.test(value) ? COMMANDS.filter((entry) => entry.name.startsWith(value.slice(1)) || entry.aliases.some((alias: string) => alias.startsWith(value.slice(1)))) : [];
+  const update = (text: string, position = Array.from(text).length) => { setValue(text); setCursor(position); onDraft(text); setCompletion(0); };
+  useEffect(() => { update(draft.text); setRecall(-1); }, [draft.revision]);
   useInput((input, key) => {
-    if (key.ctrl && input === "c") return;
-    if (key.tab && matches[0]) { const next = `/${matches[0].name} `; setValue(next); setCursor(next.length); return; }
+    if (key.ctrl && ["c", "g"].includes(input)) return;
+    if (key.tab && matches.length) { setCompletion((completion + (key.shift ? matches.length - 1 : 1)) % matches.length); return; }
     if (key.return && !key.meta && !key.shift) {
-      if (value.trim()) { submit(value); setValue(""); setCursor(0); }
+      if (matches.length && !COMMANDS.some((entry) => `/${entry.name}` === value || entry.aliases.some((alias: string) => `/${alias}` === value))) { update(`/${matches[completion % matches.length]!.name} `); return; }
+      if (value.trim() && submit(value)) { update(""); setRecall(-1); }
+      return;
+    }
+    if (key.upArrow || key.downArrow) {
+      if (matches.length) { setCompletion((completion + (key.upArrow ? matches.length - 1 : 1)) % matches.length); return; }
+      if (!value.includes("\n") || key.ctrl) {
+        if (!history.length) return;
+        if (recall === -1) setSaved(value);
+        const next = Math.max(-1, Math.min(history.length - 1, recall + (key.upArrow ? 1 : -1)));
+        setRecall(next); update(next < 0 ? saved : history[history.length - 1 - next]!); return;
+      }
+      const start = chars.lastIndexOf("\n", cursor - 1) + 1;
+      const column = cursor - start;
+      if (key.upArrow && start > 0) { const previous = chars.lastIndexOf("\n", start - 2) + 1; setCursor(Math.min(start - 1, previous + column)); }
+      if (key.downArrow) { const end = chars.indexOf("\n", cursor); if (end >= 0) { const next = chars.indexOf("\n", end + 1); setCursor(Math.min(next < 0 ? chars.length : next, end + 1 + column)); } }
       return;
     }
     if (key.leftArrow) { setCursor(Math.max(0, cursor - 1)); return; }
     if (key.rightArrow) { setCursor(Math.min(chars.length, cursor + 1)); return; }
-    if (key.ctrl && input === "a") { setCursor(0); return; }
-    if (key.ctrl && input === "e") { setCursor(chars.length); return; }
-    if (key.ctrl && input === "u") { setValue(""); setCursor(0); return; }
-    if (key.backspace || key.delete) { chars.splice(Math.max(0, cursor - 1), cursor > 0 ? 1 : 0); setValue(chars.join("")); setCursor(Math.max(0, cursor - 1)); return; }
-    const added = key.return || (key.ctrl && input === "j") ? "\n" : key.ctrl || key.meta || key.escape || key.upArrow || key.downArrow ? "" : terminalText(input.replace(/\r\n?/gu, "\n"));
-    if (value.length + added.length > 100_000) return;
+    if (key.ctrl && input === "a") { setCursor(chars.lastIndexOf("\n", cursor - 1) + 1); return; }
+    if (key.ctrl && input === "e") { const end = chars.indexOf("\n", cursor); setCursor(end < 0 ? chars.length : end); return; }
+    if (key.ctrl && input === "u") { update(""); return; }
+    if (key.backspace) { chars.splice(Math.max(0, cursor - 1), cursor > 0 ? 1 : 0); update(chars.join(""), Math.max(0, cursor - 1)); return; }
+    if (key.delete) { chars.splice(cursor, 1); update(chars.join(""), cursor); return; }
+    if (key.pageUp || key.pageDown) return;
+    const added = key.return || (key.ctrl && input === "j") ? "\n" : key.ctrl || key.meta || key.escape ? "" : terminalText(input.replace(/\r\n?/gu, "\n"));
+    if (Buffer.byteLength(value) + Buffer.byteLength(added) > 100_000) return;
     chars.splice(cursor, 0, added);
-    setValue(chars.join(""));
-    setCursor(cursor + Array.from(added).length);
+    update(chars.join(""), cursor + Array.from(added).length);
   }, { isActive: !disabled });
-  return <Box flexDirection="column" borderStyle="round" borderColor={disabled ? "gray" : "cyan"} paddingX={1}>
-    <Text dimColor>{disabled ? "Composer paused" : "Enter send | Alt+Enter / Ctrl+J newline | Tab complete | Ctrl+U clear"}</Text>
-    <Text wrap="wrap">{chars.slice(Math.max(0, cursor - 1200), cursor).join("")}<Text inverse>{disabled ? " " : chars[cursor] ?? " "}</Text>{chars.slice(cursor + 1, cursor + 600).join("")}</Text>
-    {matches.length > 0 && <Text dimColor>{matches.slice(0, 5).map((entry) => `/${entry.name}`).join("  ")}</Text>}
+  return <Box flexDirection="column" borderStyle="round" borderColor={disabled ? "gray" : "cyan"} paddingX={1} flexShrink={0}>
+    <Text dimColor>{disabled ? "Composer paused" : `Enter ${queued ? "queue" : "send"} | Alt+Enter / Ctrl+J newline | Tab cycle | Up recall | Ctrl+G editor`}</Text>
+    <Box height={Math.min(4, Math.max(1, value.split("\n").length))} overflow="hidden"><Text wrap="wrap">{chars.slice(Math.max(0, cursor - 500), cursor).join("")}<Text inverse>{disabled ? " " : chars[cursor] ?? " "}</Text>{chars.slice(cursor + 1, cursor + 300).join("")}</Text></Box>
+    {matches.length > 0 && <Text dimColor>{matches.slice(completion, completion + 4).map((entry, index) => `${index ? "" : ">"}/${entry.name}`).join("  ")}</Text>}
   </Box>;
 }

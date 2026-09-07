@@ -24,6 +24,7 @@
     "@langchain/langgraph-sdk": "1.9.23",
     "@langchain/openai": "1.5.1",
     "@modelcontextprotocol/sdk": "1.30.0",
+    "@msgpack/msgpack": "3.1.2",
     "commander": "13.1.0",
     "deepagents": "1.13.1",
     "figlet": "^1.11.4",
@@ -34,6 +35,7 @@
     "pdfjs-dist": "4.10.38",
     "quickjs-emscripten": "0.32.0",
     "react": "19.2.0",
+    "smol-toml": "1.8.0",
     "zod": "4.2.1"
   },
   "devDependencies": {

@@ -29,10 +29,12 @@ export async function createCodeModel(options: ModelOptions, provider?: { name: 
     apiKey: (await new CredentialStore().resolve(provider.name, provider.definition)).key,
   } : modelSettings(options);
   if (provider && !provider.definition.toolCalling) throw new Error("The coding runtime requires a tool-calling provider");
+  if (provider?.settings.allowedModels && !provider.settings.allowedModels.some((spec) => spec === `${provider.name}:${settings.model}` || spec === `${provider.name}:*`)) throw new Error("Selected model is not permitted by the configured model allowlist");
   const { ChatOpenAI } = await import("@langchain/openai");
   return new ChatOpenAI({
     model: settings.model,
     apiKey: settings.apiKey,
+    ...(provider ? { metadata: { dcode_usage: { provider: provider.name, model: settings.model, endpoint: provider.definition.endpoint, price: provider.definition.prices[settings.model] ?? null } } } : {}),
     streaming: provider?.definition.streaming ?? true,
     timeout: (provider?.settings.timeoutSeconds ?? 120) * 1000,
     maxRetries: provider?.settings.maxRetries ?? 2,
