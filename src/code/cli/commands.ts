@@ -37,6 +37,7 @@ export const COMMANDS = [
   { name: "config", aliases: [], bypass: "queued", description: "Inspect settings; /config set [--user] key <JSON>; unset key" },
   { name: "reload", aliases: [], bypass: "queued", description: "Reload config and trusted integrations at an idle boundary" },
   { name: "manual", aliases: [], bypass: "always", description: "Immediately require human approval for future gated actions" },
+  { name: "plan", aliases: [], bypass: "always", description: "Research-only planning; shell and filesystem changes are rejected" },
   { name: "auto", aliases: [], bypass: "queued", description: "Classifier-backed edits; other actions require review" },
   { name: "yolo", aliases: [], bypass: "queued", description: "Open explicit unrestricted-mode acknowledgement" },
   { name: "cost", aliases: ["costs"], bypass: "queued", description: "Show durable model usage and known/unknown costs" },

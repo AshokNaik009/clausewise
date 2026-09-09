@@ -3,6 +3,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import type { ApprovalRequest } from "./approvals.js";
 import { isMissing } from "../persistence/storage.js";
+import { unifiedDiff } from "../shared/diff.js";
 
 export async function previewAction(cwd: string, action: ApprovalRequest["value"]["actionRequests"][number], routes: string[]): Promise<string> {
   if (!["write_file", "edit_file"].includes(action.name)) return JSON.stringify(action.args, null, 2);
@@ -47,22 +48,7 @@ export async function previewAction(cwd: string, action: ApprovalRequest["value"
     after = action.args.replace_all === true ? parts.join(replacement) : before.replace(old, () => replacement);
   }
   if (Buffer.byteLength(after) > 256_000) throw new Error("Proposed file exceeds the 256 KB preview limit");
-  const oldLines = before.split("\n");
-  const newLines = after.split("\n");
-  let start = 0;
-  while (start < Math.min(oldLines.length, newLines.length) && oldLines[start] === newLines[start]) start++;
-  if (start === oldLines.length && start === newLines.length) return "No content changes proposed.";
-  let end = 0;
-  while (end < Math.min(oldLines.length, newLines.length) - start && oldLines.at(-end - 1) === newLines.at(-end - 1)) end++;
-  const contextStart = Math.max(0, start - 3);
-  const contextEnd = Math.min(3, end);
-  const lines = [
-    `--- ${exists ? path : "/dev/null"}`, `+++ ${path}`,
-    `@@ -${contextStart + 1},${oldLines.length - end + contextEnd - contextStart} +${contextStart + 1},${newLines.length - end + contextEnd - contextStart} @@`,
-    ...oldLines.slice(contextStart, start).map((line) => `  ${line}`),
-    ...oldLines.slice(start, oldLines.length - end).map((line) => `- ${line}`),
-    ...newLines.slice(start, newLines.length - end).map((line) => `+ ${line}`),
-    ...oldLines.slice(oldLines.length - end, oldLines.length - end + contextEnd).map((line) => `  ${line}`),
-  ];
+  const lines = unifiedDiff(path, before, after, { exists });
+  if (!lines) return "No content changes proposed.";
   return `Current-file preview only; the file may change before execution.\n${lines.join("\n")}`;
 }

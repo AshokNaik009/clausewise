@@ -10,6 +10,9 @@ import { fakeModel } from "@langchain/core/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionStore } from "../persistence/sessions.js";
 import { CodeRuntime } from "../runtime/agent.js";
+import { ApprovalPolicy } from "../runtime/approval-mode.js";
+import { GATED_TOOLS } from "../runtime/approvals.js";
+import { planningPrompt } from "../runtime/prompt.js";
 import { SessionControls } from "./controls.js";
 import { readArchive, listArchives } from "./archives.js";
 import { atomicJson } from "../persistence/storage.js";
@@ -143,5 +146,60 @@ describe("non-destructive session recovery", () => {
     expect(await readFile(source, "utf8")).toBe(text);
     expect(() => pythonMessages({ channel_values: { messages: [{ lc: 1, type: "constructor", id: ["os", "system"], kwargs: { content: "not code" } }] } })).toThrow(/namespace/);
     expect(() => pythonMessages({ channel_values: { messages: [{ type: "ai", content: "", tool_calls: [{ id: "pending", name: "execute", args: {} }] }] } })).toThrow(/pending tool/);
+  });
+});
+
+describe("plan mode", () => {
+  const request = (...names: string[]) => ({
+    id: `interrupt-${names.join("-")}`,
+    value: {
+      actionRequests: names.map((name) => ({ name, args: { file_path: "/notes.txt", content: "value" } })),
+      reviewConfigs: names.map((name) => ({ actionName: name, allowedDecisions: ["approve", "reject", "edit"] as ("approve" | "reject" | "edit")[] })),
+    },
+  });
+  const context = (root: string) => ({ cwd: root, userRequest: "Plan the change", model: fakeModel(), ledger: undefined, signal: new AbortController().signal });
+
+  it("rejects mutating tools without approving anything", async () => {
+    const policy = new ApprovalPolicy();
+    policy.set("plan", undefined, false);
+    expect(policy.automatic).toBe(false);
+    expect(policy.resolving).toBe(true);
+    const decisions = await policy.decide([request("write_file", "edit_file"), request("execute"), request("delete")], context("/tmp"));
+    expect(Object.values(decisions ?? {}).flat()).toEqual(Array.from({ length: 4 }, () => ({ type: "reject", message: expect.stringContaining("Plan mode is active") })));
+    expect(fakeModel().callCount).toBe(0);
+  });
+
+  it("leaves research and mixed batches to human review, and never gates read-only tools", async () => {
+    const policy = new ApprovalPolicy();
+    policy.set("plan", undefined, false);
+    expect(await policy.decide([request("web_search")], context("/tmp"))).toBeUndefined();
+    expect(await policy.decide([request("task")], context("/tmp"))).toBeUndefined();
+    expect(await policy.decide([request("write_file", "web_search")], context("/tmp"))).toBeUndefined();
+    for (const name of ["ls", "read_file", "glob", "grep"]) expect(GATED_TOOLS).not.toContain(name);
+  });
+
+  it("keeps a proposed write off disk and feeds the rejection back to the model", async () => {
+    const root = await directory();
+    const store = new SessionStore(root);
+    const info = await store.create({ cwd: root, model: "fake" });
+    const model = fakeModel()
+      .respondWithTools([{ name: "write_file", args: { file_path: "/plan.txt", content: "value" }, id: "write-1" }])
+      .respond(new AIMessage("Here is the plan instead."));
+    await store.use(info.id, async (session) => {
+      const runtime = await CodeRuntime.create(session, { model, projectContext: false });
+      try {
+        const first = await runtime.turn("Add a file", { guidance: planningPrompt() });
+        expect(first.status).toBe("interrupted");
+        const policy = new ApprovalPolicy();
+        policy.set("plan", undefined, false);
+        const decisions = await policy.decide(first.approvals, { cwd: root, userRequest: "Add a file", model, ledger: undefined, signal: new AbortController().signal });
+        expect(decisions).toBeDefined();
+        expect((await runtime.turn(null, { decisions: decisions! })).status).toBe("completed");
+        await expect(readFile(join(root, "plan.txt"))).rejects.toThrow();
+        const history = await runtime.history();
+        expect(history[0]?.text).toContain("Plan mode is active for this turn");
+        expect(history.at(-1)?.text).toBe("Here is the plan instead.");
+      } finally { await runtime.close(); }
+    });
   });
 });

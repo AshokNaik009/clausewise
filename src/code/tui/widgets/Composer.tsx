@@ -2,27 +2,54 @@ import { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { COMMANDS } from "../../cli/commands.js";
 import { terminalText } from "../../shared/output.js";
+import { matchFiles } from "../files.js";
+import { truncate } from "../render/lines.js";
+import { useTheme } from "../theme.js";
 
-export function Composer({ disabled, submit, draft, onDraft, history = [], queued = false }: { disabled: boolean; submit: (value: string) => boolean; draft: { text: string; revision: number }; onDraft: (text: string) => void; history?: string[]; queued?: boolean }) {
+interface Completion { insert: string; label: string; description?: string }
+
+/** Rows of the completion dropdown shown under the composer. */
+const VISIBLE_COMPLETIONS = 6;
+
+export function Composer({ disabled, submit, draft, onDraft, history = [], queued = false, files = [], width = 80 }: { disabled: boolean; submit: (value: string) => boolean; draft: { text: string; revision: number }; onDraft: (text: string) => void; history?: string[]; queued?: boolean; files?: string[]; width?: number }) {
+  const theme = useTheme();
   const [value, setValue] = useState(draft.text);
   const [cursor, setCursor] = useState(Array.from(draft.text).length);
   const [recall, setRecall] = useState(-1);
   const [saved, setSaved] = useState("");
   const [completion, setCompletion] = useState(0);
+  const [dismissed, setDismissed] = useState<string>();
   const chars = Array.from(value);
-  const matches = value.startsWith("/") && !/\s/u.test(value) ? COMMANDS.filter((entry) => entry.name.startsWith(value.slice(1)) || entry.aliases.some((alias: string) => alias.startsWith(value.slice(1)))) : [];
-  const update = (text: string, position = Array.from(text).length) => { setValue(text); setCursor(position); onDraft(text); setCompletion(0); };
+
+  let tokenStart = cursor;
+  while (tokenStart > 0 && !/\s/u.test(chars[tokenStart - 1] ?? " ")) tokenStart--;
+  const token = chars.slice(tokenStart, cursor).join("");
+  const commands: Completion[] = value.startsWith("/") && !/\s/u.test(value)
+    ? COMMANDS.filter((entry) => entry.name.startsWith(value.slice(1)) || entry.aliases.some((alias: string) => alias.startsWith(value.slice(1)))).map((entry) => ({ insert: `/${entry.name} `, label: `/${entry.name}`, description: entry.description }))
+    : [];
+  const fileQuery = !commands.length && token.startsWith("@") ? token.slice(1) : undefined;
+  const options: Completion[] = dismissed === token ? [] : commands.length ? commands : fileQuery === undefined ? [] : matchFiles(files, fileQuery, 8).map((path) => ({ insert: `@${path} `, label: path }));
+  const selected = options.length ? options[completion % options.length]! : undefined;
+
+  const update = (text: string, position = Array.from(text).length) => { setValue(text); setCursor(position); onDraft(text); setCompletion(0); setDismissed(undefined); };
+  const accept = (option: Completion) => {
+    const inserted = Array.from(option.insert);
+    const next = [...chars.slice(0, commands.length ? 0 : tokenStart), ...inserted, ...chars.slice(cursor)];
+    update(next.join(""), (commands.length ? 0 : tokenStart) + inserted.length);
+  };
   useEffect(() => { update(draft.text); setRecall(-1); }, [draft.revision]);
   useInput((input, key) => {
     if (key.ctrl && ["c", "g"].includes(input)) return;
-    if (key.tab && matches.length) { setCompletion((completion + (key.shift ? matches.length - 1 : 1)) % matches.length); return; }
+    if (key.escape && options.length) { setDismissed(token); return; }
+    if (key.tab && options.length) { setCompletion((completion + (key.shift ? options.length - 1 : 1)) % options.length); return; }
     if (key.return && !key.meta && !key.shift) {
-      if (matches.length && !COMMANDS.some((entry) => `/${entry.name}` === value || entry.aliases.some((alias: string) => `/${alias}` === value))) { update(`/${matches[completion % matches.length]!.name} `); return; }
+      const exactCommand = COMMANDS.some((entry) => `/${entry.name}` === value || entry.aliases.some((alias: string) => `/${alias}` === value));
+      if (selected && !exactCommand) { accept(selected); return; }
       if (value.trim() && submit(value)) { update(""); setRecall(-1); }
       return;
     }
     if (key.upArrow || key.downArrow) {
-      if (matches.length) { setCompletion((completion + (key.upArrow ? matches.length - 1 : 1)) % matches.length); return; }
+      if (options.length) { setCompletion((completion + (key.upArrow ? options.length - 1 : 1)) % options.length); return; }
       if (!value.includes("\n") || key.ctrl) {
         if (!history.length) return;
         if (recall === -1) setSaved(value);
@@ -48,9 +75,21 @@ export function Composer({ disabled, submit, draft, onDraft, history = [], queue
     chars.splice(cursor, 0, added);
     update(chars.join(""), cursor + Array.from(added).length);
   }, { isActive: !disabled });
-  return <Box flexDirection="column" borderStyle="round" borderColor={disabled ? "gray" : "cyan"} paddingX={1} flexShrink={0}>
-    <Text dimColor>{disabled ? "Composer paused" : `Enter ${queued ? "queue" : "send"} | Alt+Enter / Ctrl+J newline | Tab cycle | Up recall | Ctrl+G editor`}</Text>
+
+  const hint = disabled ? "Composer paused"
+    : value.startsWith("!") ? "Enter proposes this shell command through the normal approval"
+    : `Enter ${queued ? "queue" : "send"} | Alt+Enter / Ctrl+J newline | @ file | ! shell | Tab cycle | Up recall | Ctrl+G editor`;
+  const start = Math.min(completion - (completion % VISIBLE_COMPLETIONS), Math.max(0, options.length - VISIBLE_COMPLETIONS));
+  return <Box flexDirection="column" borderStyle="round" borderColor={disabled ? "gray" : theme.accent ?? "gray"} paddingX={1} flexShrink={0}>
+    <Text dimColor>{hint}</Text>
     <Box height={Math.min(4, Math.max(1, value.split("\n").length))} overflow="hidden"><Text wrap="wrap">{chars.slice(Math.max(0, cursor - 500), cursor).join("")}<Text inverse>{disabled ? " " : chars[cursor] ?? " "}</Text>{chars.slice(cursor + 1, cursor + 300).join("")}</Text></Box>
-    {matches.length > 0 && <Text dimColor>{matches.slice(completion, completion + 4).map((entry, index) => `${index ? "" : ">"}/${entry.name}`).join("  ")}</Text>}
+    {options.slice(start, start + VISIBLE_COMPLETIONS).map((option, index) => {
+      const active = options[start + index] === selected;
+      return <Text key={option.label} wrap="truncate">
+        <Text {...(active ? { bold: true, ...(theme.accent ? { color: theme.accent } : { inverse: true }) } : {})}>{active ? "> " : "  "}{option.label}</Text>
+        {option.description ? <Text dimColor>  {truncate(option.description, Math.max(10, width - option.label.length - 8))}</Text> : null}
+      </Text>;
+    })}
+    {options.length > VISIBLE_COMPLETIONS ? <Text dimColor>  {completion % options.length + 1}/{options.length}</Text> : null}
   </Box>;
 }

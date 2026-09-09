@@ -16,7 +16,7 @@ import { z } from "zod";
 import { approvalRequests, approvalResume, createInterruptPolicy, type ApprovalDecisions } from "./approvals.js";
 import { CodeBackend } from "./backend.js";
 import { createCodeModel } from "./model.js";
-import { errorText, messageText } from "../shared/output.js";
+import { errorText, messageText, reasoningText } from "../shared/output.js";
 import { codingPrompt } from "./prompt.js";
 import type { CodeEvent, ConversationMessage, TurnResult } from "../protocol/index.js";
 import type { SessionContext } from "../persistence/sessions.js";
@@ -38,6 +38,8 @@ export interface TurnOptions {
   decisions?: ApprovalDecisions;
   onEvent?: (event: CodeEvent) => void | Promise<void>;
   signal?: AbortSignal;
+  /** Mode guidance appended to the submitted prompt; approval policy, not this text, is the enforcement. */
+  guidance?: string;
 }
 
 async function existingPaths(cwd: string, paths: string[]): Promise<string[]> {
@@ -92,6 +94,8 @@ async function streamEvent(chunk: unknown, emit: NonNullable<TurnOptions["onEven
   if (mode === "messages" && Array.isArray(data) && BaseMessage.isInstance(data[0])) {
     const message = data[0];
     if (message.type !== "ai") return;
+    const reasoning = reasoningText(message.content);
+    if (reasoning) await emit({ type: "reasoning", text: reasoning, namespace });
     const text = messageText(message.content);
     if (text) await emit({ type: "text", text, namespace });
   }
@@ -104,7 +108,7 @@ async function streamEvent(chunk: unknown, emit: NonNullable<TurnOptions["onEven
           await emit({ type: "tool_call", id: call.id ?? "", name: call.name, args: call.args, namespace });
         }
       } else if (ToolMessage.isInstance(message)) {
-        await emit({ type: "tool_result", id: message.tool_call_id, name: message.name ?? "tool", content: messageText(message.content), namespace });
+        await emit({ type: "tool_result", id: message.tool_call_id, name: message.name ?? "tool", content: messageText(message.content), ...(message.status ? { status: message.status } : {}), namespace });
       }
     }
   }
@@ -216,8 +220,9 @@ export class CodeRuntime {
         throw new Error("Provide a non-empty prompt only after resolving pending approvals");
       }
       if (options.decisions !== undefined && current.approvals.length === 0) throw new Error("There are no pending approvals");
+      const submitted = prompt !== null && options.guidance ? `${prompt}\n\n${options.guidance}` : prompt;
       let input = options.decisions !== undefined ? new Command({ resume: approvalResume(current.approvals, options.decisions) })
-        : prompt !== null ? { messages: [{ role: "user" as const, content: prompt }] } : null;
+        : submitted !== null ? { messages: [{ role: "user" as const, content: submitted }] } : null;
       if (options.decisions) for (const request of current.approvals) for (const [index, action] of request.value.actionRequests.entries()) {
         const decision = options.decisions[request.id]?.[index];
         if (decision && decision.type !== "reject") await this.extensions?.hooks.guard("PermissionRequest", { session_id: this.context.info.id, tool_name: action.name, tool_input: decision.type === "edit" ? decision.editedAction.args : action.args }, signal);
@@ -229,7 +234,7 @@ export class CodeRuntime {
       if (executed && prompt !== null) {
         const hook = await this.extensions?.hooks.guard("UserPromptSubmit", { session_id: this.context.info.id, prompt }, signal);
         if (hook?.suppressPrompt && !hook.context.some(Boolean)) { await emit({ type: "result", result: current }); return current; }
-        if (hook?.context.some(Boolean)) input = { messages: [{ role: "user" as const, content: `${hook.suppressPrompt ? "" : prompt}\n\nTrusted prompt-hook context (not authorization):\n${hook.context.join("\n")}` }] };
+        if (hook?.context.some(Boolean)) input = { messages: [{ role: "user" as const, content: `${hook.suppressPrompt ? "" : submitted}\n\nTrusted prompt-hook context (not authorization):\n${hook.context.join("\n")}` }] };
         if (this.controls && (this.controls.snapshot().goal || this.controls.snapshot().rubric)) await this.controls.beginTurn();
       }
       let result = current;

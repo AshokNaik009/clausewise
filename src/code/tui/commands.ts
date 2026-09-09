@@ -103,6 +103,7 @@ export async function executeCommand(name: CommandName | null, argument: string,
     case "reload": show(await client.configure(true)); show(await client.integrations("reload")); return;
     case "auth": if (argument === "set") ui.auth(); else if (argument) throw new Error("Use /auth or /auth set; never paste keys into commands"); else show(await client.authenticate()); return;
     case "manual": await client.setMode("manual"); print("\nManual approval mode.\n"); return;
+    case "plan": await client.setMode("plan"); print("\nPlan mode: read-only research. execute, write_file, edit_file, and delete are rejected automatically; delegation and web tools still require review. /manual, /auto, or /yolo leaves plan mode.\n"); return;
     case "auto":
       if (argument.startsWith("model ")) show(await client.settings({ autoClassifierModel: argument.slice(6) === "clear" ? null : modelSelection(argument.slice(6), client) }));
       else if (argument === "model") ui.pick("Choose Auto classifier", (await client.models()).map(({ provider, model }) => ({ value: `${provider}:${model}`, label: `${provider}:${model}` })), async (value) => { await client.settings({ autoClassifierModel: modelSelection(value, client) }); });

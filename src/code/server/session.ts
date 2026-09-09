@@ -7,6 +7,7 @@ import { ApprovalPolicy } from "../runtime/approval-mode.js";
 import { ExtensionHost } from "../extensions/host.js";
 import { createCodeModel } from "../runtime/model.js";
 import { previewAction } from "../runtime/preview.js";
+import { planningPrompt } from "../runtime/prompt.js";
 import { goalWork } from "../session/goals.js";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 
@@ -108,7 +109,7 @@ export class ServerSession {
       shellTimeoutSeconds: effective.settings.shellTimeoutSeconds ?? 120,
       provider: { name, definition, settings: effective.settings },
     });
-    if (this.extensions) this.extensions.hooks.prepare = async () => ({ ...await runtime.hookContext(), permission_mode: this.policy.mode === "manual" ? "default" : this.policy.mode === "yolo" ? "bypassPermissions" : "auto" });
+    if (this.extensions) this.extensions.hooks.prepare = async () => ({ ...await runtime.hookContext(), permission_mode: this.policy.mode === "manual" ? "default" : this.policy.mode === "plan" ? "plan" : this.policy.mode === "yolo" ? "bypassPermissions" : "auto" });
     return runtime;
   }
 
@@ -293,7 +294,7 @@ export class ServerSession {
   }
 
   async control(command: Extract<ServerCommand, { method: "controls" | "memory" | "goal" | "goal-update" | "goal-clear" | "goal-options" | "rubric" | "mode" }>) {
-    if (command.method === "mode" && command.mode === "manual") { this.policy.mode = "manual"; return this.status(); }
+    if (command.method === "mode" && (command.mode === "manual" || command.mode === "plan")) { this.policy.mode = command.mode; return this.status(); }
     if (command.method === "controls" && this.runtime?.controls) return this.runtime.controls.snapshot();
     this.assertIdle();
     this.beginMutation();
@@ -416,14 +417,19 @@ export class ServerSession {
     }
     const stream = (event: CodeEvent) => event.type === "result" || event.type === "approval_required" ? Promise.resolve() : onEvent(event);
     const done = (async () => {
-      let result = await runtime.turn(command.prompt, { signal: controller.signal, onEvent: stream, ...(command.decisions ? { decisions: command.decisions } : {}) });
+      const planning = this.policy.mode === "plan";
+      let result = await runtime.turn(command.prompt, { signal: controller.signal, onEvent: stream, ...(planning ? { guidance: planningPrompt() } : {}), ...(command.decisions ? { decisions: command.decisions } : {}) });
       const userRequest = command.prompt ?? (await runtime.history()).filter((message) => message.role === "human").at(-1)?.text ?? "";
       for (let count = 0; result.approvals.length && this.policy.mode !== "manual"; count++) {
-        if (count >= 8) { this.policy.mode = "manual"; await onEvent({ type: "policy", mode: "manual", message: "Automatic approval budget reached; review the remaining actions manually." }); break; }
+        if (count >= 8) {
+          if (this.policy.mode !== "plan") this.policy.mode = "manual";
+          await onEvent({ type: "policy", mode: this.policy.mode, message: this.policy.mode === "plan" ? "Plan mode rejected eight action batches in a row; review the remaining actions manually." : "Automatic approval budget reached; review the remaining actions manually." });
+          break;
+        }
         const decisions = await this.policy.decide(result.approvals, { cwd: this.info!.cwd, userRequest, model: runtime.classifierModel, ledger: runtime.ledger, signal: controller.signal, timeoutSeconds: this.configuration?.snapshot().settings.autoClassifierTimeout ?? 10 });
         controller.signal.throwIfAborted();
-        await onEvent({ type: "policy", mode: this.policy.mode, message: decisions ? "Policy approved this action batch." : "Policy requires human review; no action was approved." });
-        if (!decisions || !this.policy.automatic) break;
+        await onEvent({ type: "policy", mode: this.policy.mode, message: decisions ? this.policy.mode === "plan" ? "Plan mode rejected this action batch; the agent keeps planning." : "Policy approved this action batch." : "Policy requires human review; no action was approved." });
+        if (!decisions || !this.policy.resolving) break;
         result = await runtime.turn(null, { decisions, signal: controller.signal, onEvent: stream });
       }
       result = await runtime.result();

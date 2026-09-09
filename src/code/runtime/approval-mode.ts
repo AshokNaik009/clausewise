@@ -8,13 +8,31 @@ import { messageText } from "../shared/output.js";
 import { isMissing } from "../persistence/storage.js";
 import { YOLO_ACKNOWLEDGEMENT, type ApprovalMode } from "../protocol/session-controls.js";
 
+export const PLAN_DENIED_TOOLS = ["execute", "write_file", "edit_file", "delete"];
+export const PLAN_REJECTION = "Plan mode is active: shell and filesystem changes are rejected. Keep investigating with read-only tools and present a written plan instead.";
+
 export class ApprovalPolicy {
   mode: ApprovalMode = "manual";
-  get automatic(): boolean { return this.mode !== "manual"; }
+  /** Modes that approve without asking. Plan mode decides on its own but never approves. */
+  get automatic(): boolean { return this.mode === "auto" || this.mode === "yolo"; }
+  /** Modes whose decisions are resolved without a human: `decide` may return decisions to apply. */
+  get resolving(): boolean { return this.mode !== "manual"; }
 
   set(mode: ApprovalMode, acknowledgement: string | undefined, allowYolo: boolean): void {
     if (mode === "yolo" && (!allowYolo || acknowledgement !== YOLO_ACKNOWLEDGEMENT)) throw new Error("YOLO requires explicit acknowledgement and must be permitted by managed policy");
     this.mode = mode;
+  }
+
+  /**
+   * Plan mode rejects the mutating tools outright. Batches that contain anything else
+   * (task, web_search, fetch_url) fall through to human review: research during planning
+   * is the point, and a mixed batch must not be blanket-denied.
+   */
+  private planDecisions(requests: ApprovalRequest[]): ApprovalDecisions | undefined {
+    const actions = requests.flatMap((request) => request.value.actionRequests);
+    if (!actions.length || !actions.every((action) => PLAN_DENIED_TOOLS.includes(action.name))) return undefined;
+    if (requests.some((request) => request.value.reviewConfigs.some((review) => !review.allowedDecisions.includes("reject")))) return undefined;
+    return Object.fromEntries(requests.map((request) => [request.id, request.value.actionRequests.map(() => ({ type: "reject" as const, message: PLAN_REJECTION }))]));
   }
 
   private async eligible(cwd: string, request: ApprovalRequest): Promise<boolean> {
@@ -34,6 +52,7 @@ export class ApprovalPolicy {
 
   async decide(requests: ApprovalRequest[], context: { cwd: string; userRequest: string; model: BaseChatModel; ledger: UsageLedger | undefined; signal: AbortSignal; timeoutSeconds?: number }): Promise<ApprovalDecisions | undefined> {
     if (this.mode === "manual") return undefined;
+    if (this.mode === "plan") return this.planDecisions(requests);
     if (requests.some((request) => request.value.reviewConfigs.some((review) => !review.allowedDecisions.includes("approve")))) return undefined;
     if (this.mode === "auto") {
       try {

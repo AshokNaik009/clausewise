@@ -15,6 +15,6 @@ export const tokenDetailsSchema = z.object({ input_tokens: z.number().nonnegativ
 export const priceSchema = z.object({ input: z.number().nonnegative(), output: z.number().nonnegative(), cacheRead: z.number().nonnegative().optional(), cacheWrite: z.number().nonnegative().optional() }).strict();
 export type ModelPrice = z.infer<typeof priceSchema>;
 export const costSummarySchema = z.object({ requests: z.number(), input: z.number(), output: z.number(), knownCostUsd: z.number(), unpricedRequests: z.number(), cacheRead: z.number(), reasoning: z.number() });
-export const modeSchema = z.enum(["manual", "auto", "yolo"]);
+export const modeSchema = z.enum(["manual", "plan", "auto", "yolo"]);
 export type ApprovalMode = z.infer<typeof modeSchema>;
 export const YOLO_ACKNOWLEDGEMENT = "I accept unrestricted host execution";

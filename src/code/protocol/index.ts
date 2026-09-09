@@ -20,8 +20,9 @@ export const conversationSchema = z.object({ role: z.string(), text: z.string() 
 export type ConversationMessage = z.infer<typeof conversationSchema>;
 export const eventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text"), text: z.string(), namespace: z.array(z.string()) }),
+  z.object({ type: z.literal("reasoning"), text: z.string(), namespace: z.array(z.string()) }),
   z.object({ type: z.literal("tool_call"), id: z.string(), name: z.string(), args: z.record(z.string(), z.unknown()), namespace: z.array(z.string()) }),
-  z.object({ type: z.literal("tool_result"), id: z.string(), name: z.string(), content: z.string(), namespace: z.array(z.string()) }),
+  z.object({ type: z.literal("tool_result"), id: z.string(), name: z.string(), content: z.string(), status: z.enum(["success", "error"]).optional(), namespace: z.array(z.string()) }),
   z.object({ type: z.literal("approval_required"), requests: z.array(requestSchema) }),
   z.object({ type: z.literal("result"), result: resultSchema }),
   z.object({ type: z.literal("policy"), mode: modeSchema, message: z.string() }),

@@ -1,34 +1,40 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, render, useApp, useInput, useStdout } from "ink";
+import { Box, render, useApp, useInput, useStdout } from "ink";
 import { AgentClient } from "../client/agent-client.js";
 import { PromptQueue } from "../client/prompt-queue.js";
 import { parseCommand } from "../cli/commands.js";
 import type { ApprovalDecision, ApprovalDecisions, ApprovalRequest } from "../runtime/approvals.js";
 import { errorText, terminalText } from "../shared/output.js";
-import { PORT_VERSION } from "../shared/parity.js";
 import type { CodeEvent, ServerStatus, TurnResult } from "../protocol/index.js";
 import type { CodeSettings } from "../config/configuration.js";
 import { ApprovalPanel } from "./widgets/ApprovalPanel.js";
 import { Composer } from "./widgets/Composer.js";
+import { Header } from "./widgets/Header.js";
+import { HintBar, StatusBar, statusSegments } from "./widgets/StatusBar.js";
+import { Transcript } from "./widgets/Transcript.js";
 import { Picker, type PickerItem } from "./widgets/Picker.js";
 import { SecretField } from "./widgets/SecretField.js";
 import { ModeConfirmation } from "./widgets/ModeConfirmation.js";
 import { ConfirmationPanel } from "./widgets/ConfirmationPanel.js";
 import { executeCommand } from "./commands.js";
 import { editPrompt } from "./desktop.js";
-import { wrapTerminal } from "./layout.js";
+import { indexFiles } from "./files.js";
+import { gitBranch } from "./git.js";
+import { transcriptLines } from "./render/entry.js";
+import { appendEntry, appendEvent, type Entry } from "./transcript.js";
+import { GlyphContext, ThemeContext, glyphs as glyphSet, resolveCharset, themeFor } from "./theme.js";
 import { validTerminalSequence } from "../extensions/hook-output.js";
 
 interface Review { requests: ApprovalRequest[]; request: number; action: number; decisions: ApprovalDecisions }
 interface Selection { title: string; items: PickerItem[]; choose: (value: string) => Promise<void>; command?: string }
-interface TerminalSnapshot { transcript: string; draft: string; history: string[]; notices: string[]; queue: PromptQueue; preferences: CodeSettings; update?: import("../cli/updates.js").UpdatePlan }
+interface TerminalSnapshot { entries: Entry[]; draft: string; history: string[]; notices: string[]; queue: PromptQueue; preferences: CodeSettings; update?: import("../cli/updates.js").UpdatePlan }
 
 function TerminalApp({ client, snapshot }: { client: AgentClient; snapshot: TerminalSnapshot }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [size, setSize] = useState({ columns: stdout.columns || 80, rows: stdout.rows || 24 });
   const [status, setStatus] = useState<ServerStatus>();
-  const [transcript, setTranscript] = useState(snapshot.transcript);
+  const [entries, setEntries] = useState<Entry[]>(snapshot.entries);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const leaving = useRef(false);
@@ -40,16 +46,18 @@ function TerminalApp({ client, snapshot }: { client: AgentClient; snapshot: Term
   const [confirmation, setConfirmation] = useState<{ title: string; text: string; accept: () => Promise<void> }>();
   const [clock, setClock] = useState(0);
   const [queueTick, setQueueTick] = useState(0);
+  const [branch, setBranch] = useState<string>();
+  const [files, setFiles] = useState<string[]>([]);
   const [draft, setDraft] = useState({ text: snapshot.draft, revision: 0 });
   const queue = snapshot.queue;
   const changedQueue = () => setQueueTick((value) => value + 1);
-  const append = (text: string) => {
-    snapshot.transcript = (snapshot.transcript + terminalText(text)).slice(-300_000);
-    setTranscript(snapshot.transcript);
-  };
+  const commit = (next: Entry[]) => { snapshot.entries = next; setEntries(next); };
+  const add = (entry: Entry) => commit(appendEntry(snapshot.entries, entry));
+  /** Slash commands print blocks of text; they become notices so they stay addressable. */
+  const print = (text: string) => { const trimmed = terminalText(text).replace(/^\n+|\n+$/gu, ""); if (trimmed) add({ kind: "notice", text: trimmed, level: "info", at: Date.now() }); };
   const notice = (message: string) => {
     snapshot.notices = [...snapshot.notices, terminalText(message)].slice(-100);
-    append(`\n[notice] ${message}\n`);
+    add({ kind: "notice", text: terminalText(message), level: "info", at: Date.now() });
   };
   const fillDraft = (text: string) => { snapshot.draft = text; setDraft((value) => ({ text, revision: value.revision + 1 })); };
   const refresh = async () => {
@@ -61,15 +69,17 @@ function TerminalApp({ client, snapshot }: { client: AgentClient; snapshot: Term
   const finishResult = (result: TurnResult) => {
     if (result.status !== "completed") { queue.paused = true; changedQueue(); }
     if (result.approvals.length) setReview({ requests: result.approvals, request: 0, action: 0, decisions: {} });
-    append(`\n[${result.status}]\n`);
+    add({ kind: "status", text: result.status, at: Date.now() });
   };
   const onEvent = (event: CodeEvent) => {
-    if (event.type === "notice") notice(event.message);
-    if (event.type === "terminal" && stdout.isTTY && snapshot.preferences.terminalEscapes !== false && validTerminalSequence(event.sequence)) stdout.write(event.sequence);
-    if (event.type === "policy") { notice(`[${event.mode}] ${event.message}`); setStatus((current) => current ? { ...current, mode: event.mode } : current); }
-    if (event.type === "text") append(event.namespace.length ? `\n[${event.namespace.join("/")}] ${event.text}` : event.text);
-    if (event.type === "tool_call") append(`\n[requested ${event.name}] ${JSON.stringify(event.args).slice(0, 2000)}\n`);
-    if (event.type === "tool_result") append(`\n[result ${event.name}] ${event.content.slice(0, 12_000)}\n`);
+    if (event.type === "notice" || event.type === "policy") {
+      const message = event.type === "notice" ? event.message : `[${event.mode}] ${event.message}`;
+      snapshot.notices = [...snapshot.notices, terminalText(message)].slice(-100);
+    }
+    if (event.type === "terminal" && stdout.isTTY && snapshot.preferences.terminalEscapes !== false && validTerminalSequence(event.sequence)) { stdout.write(event.sequence); return; }
+    if (event.type === "policy") setStatus((current) => current ? { ...current, mode: event.mode } : current);
+    if (event.type === "reasoning" && snapshot.preferences.showReasoning === false) return;
+    commit(appendEvent(snapshot.entries, event));
   };
   const perform = async (operation: () => Promise<void>) => {
     if (busyRef.current || leaving.current) return;
@@ -92,16 +102,25 @@ function TerminalApp({ client, snapshot }: { client: AgentClient; snapshot: Term
     const unsubscribe = client.subscribe(onEvent, notice);
     const terminate = () => { queue.paused = true; leaving.current = true; exit(); };
     process.once("SIGTERM", terminate);
+    void indexFiles(client.session.cwd).then(setFiles).catch(() => undefined);
     void perform(async () => {
       const state = await client.status();
       const history = await client.history();
       snapshot.history = [...new Set([...history.filter(({ role }) => role === "human").map(({ text }) => text), ...snapshot.history])].slice(-200);
-      if (!snapshot.transcript.trim()) for (const message of history) append(`\n${message.role}: ${message.text}\n`);
+      if (!snapshot.entries.length) {
+        commit(history.reduce<Entry[]>((list, message) => appendEntry(list, message.role === "human"
+          ? { kind: "user", text: terminalText(message.text), at: Date.now() }
+          : { kind: "assistant", text: terminalText(message.text), at: Date.now(), namespace: [] }), snapshot.entries));
+      }
       if (state.runId) { notice("Attached to an existing run; waiting without resubmitting it."); finishResult(await client.wait()); }
       else if (state.result.approvals.length) finishResult(state.result);
     });
     return () => { unsubscribe(); stdout.off("resize", resize); clearInterval(timer); process.off("SIGTERM", terminate); };
   }, []);
+  useEffect(() => {
+    if (snapshot.preferences.hideGitBranch) { setBranch(undefined); return; }
+    void gitBranch(client.session.cwd).then(setBranch).catch(() => undefined);
+  }, [clock >> 4, client.session.cwd, snapshot.preferences.hideGitBranch]);
 
   const drive = async (prompt: string | null, decisions?: ApprovalDecisions) => {
     setScroll(0);
@@ -110,22 +129,27 @@ function TerminalApp({ client, snapshot }: { client: AgentClient; snapshot: Term
   const select = async (id: string | null) => {
     if (queue.size) { queue.paused = true; notice("Queue paused at the session boundary. It remains bound to the original session."); }
     const next = await client.select(id);
-    snapshot.transcript = `Session ${next.session.id}\n`;
-    setTranscript(snapshot.transcript);
-    for (const message of await client.history()) append(`\n${message.role}: ${message.text}\n`);
+    commit([{ kind: "notice", text: `Session ${next.session.id}`, level: "info", at: Date.now() }]);
+    for (const message of await client.history()) {
+      add(message.role === "human"
+        ? { kind: "user", text: terminalText(message.text), at: Date.now() }
+        : { kind: "assistant", text: terminalText(message.text), at: Date.now(), namespace: [] });
+    }
     setStatus(next); setScroll(0); setReview(undefined);
   };
   const pick = (title: string, items: PickerItem[], choose: (value: string) => Promise<void>) => setPicker({ title, items, choose });
   const dispatch = async (text: string) => {
     const command = parseCommand(text.trim());
     if (!command) {
-      const timestamp = snapshot.preferences.timestamps ? `[${new Date().toLocaleTimeString()}] ` : "";
-      append(`\n${timestamp}You: ${text}\n\n`);
-      await drive(text); return;
+      add({ kind: "user", text: terminalText(text), at: Date.now() });
+      /** `!cmd` is a shorthand for proposing a shell command; it still goes through approvals. */
+      const shell = text.trim().startsWith("!") ? text.trim().slice(1).trim() : "";
+      await drive(shell ? `Run exactly this shell command with the execute tool and report its output. Do not modify it, and take no other action: ${shell}` : text);
+      return;
     }
     if (command.name === "editor") { leaving.current = true; exit("editor"); return; }
     await executeCommand(command.name, command.argument, {
-      client, print: append, select, run: drive,
+      client, print, select, run: drive,
       installUpdate: async (plan) => { if (queue.size || snapshot.draft.trim()) throw new Error("Save or clear queued prompts and the composer draft before updating"); snapshot.update = plan; leaving.current = true; exit("update"); },
       pick: (title, items, choose, deferred) => setPicker({ title, items, choose, ...(deferred === null ? {} : { command: deferred ?? (command.name === "threads" ? "/resume" : command.name === "auto" ? "/auto model" : `/${command.name}`) }) }),
       confirm: (title, text, accept) => setConfirmation({ title, text, accept }), auth: () => setAuth(true), yolo: () => setConfirmMode(true),
@@ -147,7 +171,7 @@ function TerminalApp({ client, snapshot }: { client: AgentClient; snapshot: Term
         await perform(() => select(null)); return;
       case "prompts":
         pick("Recall a prompt (does not send)", snapshot.history.map((text, index) => ({ value: String(index), label: text.replace(/\n/gu, " ").slice(0, 200) })), async (value) => fillDraft(snapshot.history[Number(value)] ?? "")); return;
-      case "notifications": append(`\n${snapshot.notices.join("\n") || "No notifications"}\n`); return;
+      case "notifications": print(snapshot.notices.join("\n") || "No notifications"); return;
       case "queue": {
         const [action, index] = argument.split(/\s+/u);
         if (action === "pause") queue.paused = true;
@@ -156,9 +180,9 @@ function TerminalApp({ client, snapshot }: { client: AgentClient; snapshot: Term
         else if (action === "edit" || action === "remove") { const entry = queue.remove(Number(index)); if (action === "edit") fillDraft(entry.text); }
         else if (action) throw new Error("Use /queue [pause|resume|clear|edit N|remove N]");
         changedQueue();
-        append(`\nQueue ${queue.paused ? "paused" : "ready"}:\n${queue.snapshot().map((entry, index) => `${index + 1}. ${entry.text}`).join("\n") || "Empty"}\n`); return;
+        print(`Queue ${queue.paused ? "paused" : "ready"}:\n${queue.snapshot().map((entry, index) => `${index + 1}. ${entry.text}`).join("\n") || "Empty"}`); return;
       }
-      default: await dispatch(text); if (name === "manual") await refresh();
+      default: await dispatch(text); if (name === "manual" || name === "plan") await refresh();
     }
   };
   const submit = (text: string): boolean => {
@@ -202,29 +226,49 @@ function TerminalApp({ client, snapshot }: { client: AgentClient; snapshot: Term
 
   const width = Math.max(4, size.columns - 4);
   const rows = Math.max(1, size.rows - 14);
-  const lines = useMemo(() => wrapTerminal(transcript, width), [transcript, width]);
+  const theme = themeFor(snapshot.preferences.theme);
+  const glyphs = glyphSet(resolveCharset(snapshot.preferences.charset));
+  const spinner = glyphs.spinner[clock % glyphs.spinner.length]!;
+  const timestamps = snapshot.preferences.timestamps === true;
+  const lines = useMemo(
+    () => transcriptLines(entries, { width, theme, glyphs, timestamps, spinner }),
+    [entries, width, theme, glyphs, timestamps, spinner],
+  );
   const end = Math.max(rows, lines.length - Math.min(scroll, Math.max(0, lines.length - rows)));
-  const theme = snapshot.preferences.theme;
-  const accent = theme === "plain" ? undefined : theme === "light" ? "blue" : "cyan";
-  return <Box flexDirection="column" width={size.columns} height={Math.max(8, size.rows - 1)}>
-    <Box justifyContent="space-between"><Text bold {...(accent ? { color: accent } : {})}>dcode-ts {PORT_VERSION}</Text><Text color={status?.mode === "yolo" ? "red" : "yellow"}>{(status?.mode ?? "manual").toUpperCase()} | HOST EXECUTION</Text></Box>
-    <Text dimColor wrap="truncate">{terminalText(client.session.title ?? (snapshot.preferences.hideCwd ? "Working directory hidden" : client.session.cwd))} | {client.session.id}</Text>
-    <Text wrap="truncate">{terminalText(client.session.model)} | {client.state} | {busy ? ["-", "\\", "|", "/"][clock % 4] + " running" : status?.state ?? "connecting"} | queued {queue.size}{queue.paused ? " paused" : ""} | tokens {status?.result.usage.total ?? 0}</Text>
-    <Box flexDirection="column" flexGrow={1} overflow="hidden" borderStyle="single" borderColor="gray" paddingX={1}>
-      {confirmation ? <ConfirmationPanel title={confirmation.title} text={confirmation.text} choose={(accepted) => { const current = confirmation; setConfirmation(undefined); if (accepted) void perform(current.accept); }} /> : confirmMode ? <ModeConfirmation confirm={(acknowledgement) => { setConfirmMode(false); if (acknowledgement) void perform(async () => { await client.setMode("yolo", acknowledgement); notice("YOLO is active. /manual restores individual approvals."); }); }} />
-        : auth ? <SecretField label={`API key for ${client.session.provider ?? "openai"}`} submit={(key) => { setAuth(false); if (key) void perform(async () => { await client.authenticate(key); notice("Credential saved and model refreshed."); }); }} />
-        : review ? <ApprovalPanel key={`${review.request}:${review.action}`} request={review.requests[review.request]!} actionIndex={review.action} decide={decide} height={rows} lineNumbers={snapshot.preferences.lineNumbers ?? false} loadPreview={() => client.preview(review.requests[review.request]!.id, review.action)} />
-        : picker ? <Picker title={picker.title} items={picker.items} choose={(value) => { const current = picker; setPicker(undefined); if (value !== undefined) { if (current.command) submit(`${current.command} ${value}`); else void current.choose(value).catch((error: unknown) => notice(errorText(error))); } }} />
-        : lines.slice(Math.max(0, end - rows), end).map((line, index) => <Text key={index} wrap="truncate" bold={/^#{1,6} /u.test(line)} {...(line.startsWith("+ ") ? { color: "green" } : line.startsWith("- ") ? { color: "red" } : {})}>{line}</Text>)}
+  const segments = statusSegments({
+    mode: status?.mode ?? "manual",
+    activity: busy ? `${spinner} running` : status?.state ?? "connecting",
+    connection: client.state,
+    queued: queue.size,
+    paused: queue.paused,
+    model: terminalText(client.session.model),
+    ...(branch ? { branch } : {}),
+    tokens: status?.result.usage.total ?? 0,
+    ...(status?.result.costs ? { costUsd: status.result.costs.knownCostUsd } : {}),
+    ...(snapshot.preferences.hideCwd ? {} : { cwd: client.session.cwd }),
+    width,
+  }, glyphs);
+  return <ThemeContext.Provider value={theme}><GlyphContext.Provider value={glyphs}>
+    <Box flexDirection="column" width={size.columns} height={Math.max(8, size.rows - 1)}>
+      <Header mode={status?.mode ?? "manual"} title={client.session.title ?? (snapshot.preferences.hideCwd ? "Working directory hidden" : client.session.cwd)} sessionId={client.session.id} width={size.columns} />
+      <Box flexDirection="column" flexGrow={1} overflow="hidden" borderStyle="single" borderColor={theme.border ?? "gray"} paddingX={1}>
+        {confirmation ? <ConfirmationPanel title={confirmation.title} text={confirmation.text} choose={(accepted) => { const current = confirmation; setConfirmation(undefined); if (accepted) void perform(current.accept); }} /> : confirmMode ? <ModeConfirmation confirm={(acknowledgement) => { setConfirmMode(false); if (acknowledgement) void perform(async () => { await client.setMode("yolo", acknowledgement); notice("YOLO is active. /manual restores individual approvals."); }); }} />
+          : auth ? <SecretField label={`API key for ${client.session.provider ?? "openai"}`} submit={(key) => { setAuth(false); if (key) void perform(async () => { await client.authenticate(key); notice("Credential saved and model refreshed."); }); }} />
+          : review ? <ApprovalPanel key={`${review.request}:${review.action}`} request={review.requests[review.request]!} actionIndex={review.action} decide={decide} height={rows} lineNumbers={snapshot.preferences.lineNumbers ?? false} loadPreview={() => client.preview(review.requests[review.request]!.id, review.action)} />
+          : picker ? <Picker title={picker.title} items={picker.items} choose={(value) => { const current = picker; setPicker(undefined); if (value !== undefined) { if (current.command) submit(`${current.command} ${value}`); else void current.choose(value).catch((error: unknown) => notice(errorText(error))); } }} />
+          : <Transcript lines={lines} from={Math.max(0, end - rows)} to={end} />}
+      </Box>
+      <StatusBar segments={segments} width={size.columns} />
+      <HintBar busy={busy} scroll={scroll > 0} {...(snapshot.preferences.scrollbar ? { position: `${Math.min(end, lines.length)}/${lines.length}` } : {})} />
+      <Composer disabled={!!review || !!picker || auth || confirmMode || !!confirmation} submit={submit} draft={draft} onDraft={(text) => { snapshot.draft = text; }} history={snapshot.history} queued={busy || queue.size > 0 || queue.paused} files={files} width={width} />
     </Box>
-    <Text dimColor>PgUp/PgDn scroll | Ctrl+C {busy ? "cancel" : "exit"} | /continue approvals{snapshot.preferences.scrollbar ? ` | ${Math.min(end, lines.length)}/${lines.length}` : ""}{scroll ? " | SCROLLBACK" : ""}</Text>
-    <Composer disabled={!!review || !!picker || auth || confirmMode || !!confirmation} submit={submit} draft={draft} onDraft={(text) => { snapshot.draft = text; }} history={snapshot.history} queued={busy || queue.size > 0 || queue.paused} />
-  </Box>;
+  </GlyphContext.Provider></ThemeContext.Provider>;
 }
 
 export async function runTerminal(initial: AgentClient, directory: string): Promise<void> {
   let client = initial;
-  const snapshot: TerminalSnapshot = { transcript: "", draft: "", history: [], notices: [], queue: new PromptQueue(), preferences: {} };
+  const snapshot: TerminalSnapshot = { entries: [], draft: "", history: [], notices: [], queue: new PromptQueue(), preferences: {} };
+  const record = (text: string) => { snapshot.entries = appendEntry(snapshot.entries, { kind: "notice", text, level: "info", at: Date.now() }); };
   try {
     for (;;) {
       process.stdout.write("\u001b[?1049h");
@@ -242,14 +286,14 @@ export async function runTerminal(initial: AgentClient, directory: string): Prom
       }
       if (action === "editor") {
         try { snapshot.draft = await editPrompt(snapshot.draft, client.session.cwd); }
-        catch (error) { snapshot.transcript += `\n${errorText(error)}\n`; }
+        catch (error) { record(errorText(error)); }
         continue;
       }
       if (action === "restart") {
         const state = await client.status();
         await client.close();
         client = await AgentClient.start(directory, state.session.id, state.options);
-        snapshot.transcript += "\nServer restarted. No prompts or tools were replayed; /continue is explicit. Queue paused.\n";
+        record("Server restarted. No prompts or tools were replayed; /continue is explicit. Queue paused.");
         continue;
       }
       break;
