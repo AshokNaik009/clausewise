@@ -9,7 +9,11 @@ export interface LaunchOptions {
   provider?: string;
   baseUrl?: string;
   execute?: string;
-  resume?: string;
+  resume?: string | true;
+  attach?: string;
+  config?: string;
+  agent?: string;
+  recursionLimit?: number;
   continue?: boolean;
   decisions?: string;
   cwd?: string;
@@ -23,15 +27,18 @@ export interface LaunchOptions {
 
 async function resolveSession(store: SessionStore, options: LaunchOptions): Promise<SessionInfo> {
   if (options.resume) {
-    const info = await store.get(options.resume);
-    if ((options.model && options.model !== info.model) || (options.baseUrl && options.baseUrl !== info.baseUrl)) {
-      throw new Error("Resume uses the stored model and endpoint. Start a new session to change them.");
-    }
+    const query = options.resume;
+    const sessions = await store.list();
+    const cwd = await realpath(options.cwd ?? process.cwd());
+    const matches = query === true ? sessions.filter((session) => session.cwd === cwd).slice(0, 1) : sessions.filter((session) => session.id.startsWith(query));
+    if (matches.length !== 1) throw new Error(matches.length ? "Resume ID prefix is ambiguous" : "No matching session to resume");
+    const info = matches[0]!;
+    if (options.baseUrl && options.baseUrl !== info.baseUrl) throw new Error("Resume cannot change the stored endpoint; use an explicitly configured provider with --provider instead");
     if (options.cwd && await realpath(options.cwd) !== info.cwd) throw new Error("The requested directory differs from the resumed session directory");
     return info;
   }
   const cwd = resolve(options.cwd ?? process.cwd());
-  const configuration = new Configuration(cwd, { ...(options.model ? { model: options.model } : {}), ...(options.provider ? { provider: options.provider } : {}) });
+  const configuration = new Configuration(cwd, { ...(options.model ? { model: options.model } : {}), ...(options.provider ? { provider: options.provider } : {}) }, options.config ? { user: resolve(options.config) } : undefined);
   const effective = await configuration.reload();
   const model = effective.settings.model;
   if (!model) throw new Error("Choose a model with --model, DCODE_MODEL, or user configuration");
@@ -70,16 +77,30 @@ export async function launch(options: LaunchOptions): Promise<number> {
     catch { throw new Error("--decisions must map pending interrupt IDs to arrays of approve/reject decisions"); }
   }
   const store = new SessionStore(options.stateDir ?? DEFAULT_STATE_DIRECTORY);
+  if (options.attach) {
+    if (headless || options.resume || options.model || options.provider || options.baseUrl || options.cwd || options.config || options.agent || options.recursionLimit !== undefined || options.trustExtensions || options.projectContext === false || options.shellTimeout !== undefined) throw new Error("--attach uses the existing server configuration and cannot be combined with launch overrides");
+    const { AgentClient } = await import("../client/agent-client.js");
+    const client = await AgentClient.attach(store.directory, options.attach);
+    try { const { runTerminal } = await import("../tui/app.js"); await runTerminal(client, store.directory); return 0; }
+    finally { await client.close(); }
+  }
+  if (!headless) {
+    const configuration = new Configuration(resolve(options.cwd ?? process.cwd()), {}, options.config ? { user: resolve(options.config) } : undefined);
+    const { ApplicationUpdates } = await import("./updates.js");
+    const updated = await new ApplicationUpdates((await configuration.reload()).settings).automatic((message) => { process.stderr.write(`${message}\n`); });
+    if (updated) { process.stderr.write(`Updated to ${updated.version}. Restart the application; no prompt was submitted or session started.\n`); return 0; }
+  }
   const info = await resolveSession(store, options);
   process.stderr.write(`Local execution is NOT sandboxed. Working directory: ${JSON.stringify(info.cwd)}\nSession: ${info.id}\n`);
   if (options.projectContext !== false) process.stderr.write("Project AGENTS.md and skill metadata may be loaded before tool approvals. Use --no-project-context to disable.\n");
   if (options.trustExtensions) process.stderr.write("Configured extensions are trusted for this run; MCP servers and hook commands may execute on the host.\n");
-  const runtimeOptions = { trustExtensions: options.trustExtensions === true, ...(options.projectContext === false ? { projectContext: false } : {}), ...(options.shellTimeout !== undefined ? { shellTimeoutSeconds: options.shellTimeout } : {}) };
+  const runtimeOptions = { trustExtensions: options.trustExtensions === true, ...(options.projectContext === false ? { projectContext: false } : {}), ...(options.shellTimeout !== undefined ? { shellTimeoutSeconds: options.shellTimeout } : {}), ...(options.config ? { configFile: resolve(options.config) } : {}), ...(options.agent ? { agent: options.agent } : {}), ...(options.recursionLimit !== undefined ? { recursionLimit: options.recursionLimit } : {}) };
   const { AgentClient } = await import("../client/agent-client.js");
   const client = await AgentClient.start(store.directory, info.id, runtimeOptions);
   const controller = new AbortController();
   const interrupt = () => controller.abort(new Error("Run cancelled; the session can be resumed"));
   try {
+    if (options.resume && (options.model || options.provider)) await client.switchModel(options.provider ?? info.provider ?? "openai", options.model ?? info.model);
     if (!headless) {
       const { runTerminal } = await import("../tui/app.js");
       await runTerminal(client, store.directory);

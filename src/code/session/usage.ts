@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { z } from "zod";
 import { BaseCallbackHandler } from "@langchain/core/callbacks/base";
 import type { LLMResult } from "@langchain/core/outputs";
+import type { Serialized } from "@langchain/core/load/serializable";
+import type { BaseMessage } from "@langchain/core/messages";
+import { priceSchema } from "../protocol/session-controls.js";
 import { isMissing } from "../persistence/storage.js";
 
 import { tokenDetailsSchema as tokens, type ModelPrice } from "../protocol/session-controls.js";
@@ -24,6 +27,14 @@ export class UsageLedger extends BaseCallbackHandler {
   private entries: UsageEntry[] = [];
   private readonly seen = new Set<string>();
   private pending: Promise<void> = Promise.resolve();
+  private readonly requests = new Map<string, { model: string; provider: string; endpoint: string; price: ModelPrice | null }>();
+
+  override handleChatModelStart(_model: Serialized, _messages: BaseMessage[][], runId: string, _parentId?: string, _extra?: Record<string, unknown>, _tags?: string[], metadata?: Record<string, unknown>): void {
+    const identity = z.object({ model: z.string(), provider: z.string(), endpoint: z.string(), price: priceSchema.nullable() }).safeParse(metadata?.dcode_usage);
+    if (identity.success) this.requests.set(runId, identity.data);
+  }
+
+  override handleLLMError(_error: Error, runId: string): void { this.requests.delete(runId); }
   private constructor(private readonly directory: string, private readonly identity: { sessionId: string; model: string; provider: string; endpoint: string }, private readonly prices: Record<string, ModelPrice>) { super({ _awaitHandler: true, raiseError: true }); }
 
   static async load(directory: string, identity: { sessionId: string; model: string; provider: string; endpoint: string }, prices: Record<string, ModelPrice> = {}): Promise<UsageLedger> {
@@ -49,7 +60,10 @@ export class UsageLedger extends BaseCallbackHandler {
     const message = generation && "message" in generation ? generation.message : undefined;
     const usage = message && typeof message === "object" && "usage_metadata" in message ? tokens.safeParse(message.usage_metadata) : undefined;
     const parsed = usage?.success ? usage.data : null;
-    const entry: UsageEntry = { version: 1, ...this.identity, requestId: runId, parentId: parentRunId ?? null, timestamp: new Date().toISOString(), usage: parsed, costUsd: estimate(parsed, this.prices[this.identity.model]) };
+    const request = this.requests.get(runId);
+    this.requests.delete(runId);
+    const { price, ...identity } = request ?? { ...this.identity, price: this.prices[this.identity.model] ?? null };
+    const entry: UsageEntry = { version: 1, ...identity, sessionId: this.identity.sessionId, requestId: runId, parentId: parentRunId ?? null, timestamp: new Date().toISOString(), usage: parsed, costUsd: estimate(parsed, price ?? undefined) };
     this.pending = this.pending.then(async () => {
       if (this.seen.has(runId)) return;
       const file = await open(join(this.directory, "usage.jsonl"), constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW, 0o600);

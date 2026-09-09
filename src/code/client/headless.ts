@@ -12,6 +12,7 @@ export async function runHeadless(runtime: Pick<CodeRuntime, "turn">, prompt: st
   let streamed = false;
   const onEvent = (event: CodeEvent) => {
     if (format === "jsonl") printEnvelope("run", event);
+    if (event.type === "notice" || event.type === "policy") process.stderr.write(`\n${terminalText(event.message)}\n`);
     if (format !== "text") return;
     if (event.type === "text" && event.namespace.length === 0) {
       streamed = true;

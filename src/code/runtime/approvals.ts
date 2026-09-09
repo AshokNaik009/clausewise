@@ -5,9 +5,10 @@ const actionSchema = z.object({
   args: z.record(z.string(), z.unknown()),
   description: z.string().optional(),
 });
-const decisionSchema = z.discriminatedUnion("type", [
+export const decisionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("approve") }).strict(),
-  z.object({ type: z.literal("reject"), message: z.string().optional() }).strict(),
+  z.object({ type: z.literal("reject"), message: z.string().max(10_000).optional() }).strict(),
+  z.object({ type: z.literal("edit"), editedAction: actionSchema.strict() }).strict(),
 ]);
 export const requestSchema = z.object({
   id: z.string().min(1),
@@ -25,8 +26,8 @@ export type ApprovalDecision = z.infer<typeof decisionSchema>;
 export type ApprovalDecisions = Record<string, ApprovalDecision[]>;
 export const GATED_TOOLS = ["execute", "write_file", "edit_file", "delete", "task", "web_search", "fetch_url"] as const;
 
-export function createInterruptPolicy(): Record<string, { allowedDecisions: ("approve" | "reject")[] }> {
-  return Object.fromEntries(GATED_TOOLS.map((name) => [name, { allowedDecisions: ["approve", "reject"] }]));
+export function createInterruptPolicy(): Record<string, { allowedDecisions: ("approve" | "reject" | "edit")[] }> {
+  return Object.fromEntries(GATED_TOOLS.map((name) => [name, { allowedDecisions: ["approve", "reject", "edit"] }]));
 }
 
 export function approvalRequests(values: unknown): ApprovalRequest[] {
@@ -50,6 +51,7 @@ export function approvalResume(requests: ApprovalRequest[], input: unknown): Rec
   return Object.fromEntries(requests.map(({ id, value }) => {
     const selected = decisions[id];
     if (!Object.hasOwn(decisions, id) || selected?.length !== value.actionRequests.length) throw new Error("Provide one decision per pending action");
+    if (selected.some((decision, index) => decision.type === "edit" && decision.editedAction.name !== value.actionRequests[index]?.name)) throw new Error("Edited approvals cannot change the tool identity");
     if (selected.some((decision, index) => !value.reviewConfigs[index]?.allowedDecisions.includes(decision.type))) {
       throw new Error("Decision is not allowed by the pending approval policy");
     }

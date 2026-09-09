@@ -16,10 +16,14 @@ export function createProgram(): Command {
     .option("--provider <name>", "named provider from user configuration (or DCODE_PROVIDER)")
     .option("--base-url <url>", "custom endpoint; requires DCODE_API_KEY (or DCODE_BASE_URL)")
     .option("-x, --execute <prompt>", "run headlessly; use - to read the prompt from stdin")
-    .option("-r, --resume <id>", "resume a stored TypeScript session")
+    .option("-r, --resume [id]", "resume by ID/prefix, or the latest session in this directory")
+    .option("--attach <server-id>", "reattach to a detached local server without rerunning tools")
     .option("--continue", "continue the unfinished turn in a resumed session")
     .option("--decisions <json>", "resume approvals: {\"interrupt-id\":[{\"type\":\"approve\"}]}")
     .option("--cwd <directory>", "working directory for a new session")
+    .option("--config <file>", "explicit user JSON or supported upstream TOML configuration")
+    .option("--agent <name>", "configured root-agent profile")
+    .option("--recursion-limit <steps>", "maximum graph steps (1–100000)", (value: string) => { const limit = Number(value); if (!Number.isInteger(limit) || limit < 1 || limit > 100_000) throw new InvalidArgumentError("Recursion limit must be 1–100000"); return limit; })
     .option("--state-dir <directory>", "session storage (default: ~/.local/state/dcode-ts/sessions)")
     .option("--json", "emit one machine-readable JSON envelope")
     .option("--stream-json", "emit streaming JSONL envelopes")
@@ -55,6 +59,33 @@ export function createProgram(): Command {
     const sessions = await new SessionStore(options.stateDir).list();
     if (options.json) printEnvelope("threads", sessions);
     else process.stdout.write(`${sessions.map((session) => terminalText(`${session.id}  ${session.updatedAt}  ${session.model}  ${session.cwd}`)).join("\n")}\n`);
+  });
+  program.command("update").description("check the confirmed npm distribution; source checkouts are never self-updated").option("--apply <version>", "explicitly install this eligible version after reviewing an update check").action(async (options: { apply?: string }) => {
+    const { Configuration } = await import("../config/configuration.js");
+    const { ApplicationUpdates } = await import("./updates.js");
+    const { printEnvelope } = await import("../client/headless.js");
+    const launch = program.opts<LaunchOptions>();
+    const config = new Configuration(launch.cwd ?? process.cwd(), {}, launch.config ? { user: launch.config } : undefined);
+    const updates = new ApplicationUpdates((await config.reload()).settings);
+    const result = await updates.check();
+    if (options.apply) {
+      if (!result.plan || result.plan.version !== options.apply) throw new Error("No eligible update matches the explicitly requested version");
+      printEnvelope("update", await updates.apply(result.plan, `Update ${result.plan.package} to ${result.plan.version}`));
+    } else printEnvelope("update", result);
+  });
+  program.command("import-python <source> <thread>").description("import completed Python SQLite/JSON conversation history into a new session; never replay Python tasks").action(async (source: string, thread: string) => {
+    const { SessionStore } = await import("../persistence/sessions.js");
+    const { importPythonSession } = await import("../persistence/python-import.js");
+    const { printEnvelope } = await import("../client/headless.js");
+    const options = program.opts<LaunchOptions>();
+    if (!options.model) throw new Error("Specify --model for the new TypeScript session");
+    const session = await importPythonSession(new SessionStore(options.stateDir), source, thread, { cwd: options.cwd ?? process.cwd(), model: options.model, ...(options.provider ? { provider: options.provider } : {}), ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}) });
+    printEnvelope("import-python", { session, notice: "Imported conversation only. Source preserved; Python tasks, approvals, and billing state were not imported." });
+  });
+  program.command("recover-lock <id>").description("recover a dead local session lock, preserving it in a recovery archive").action(async (id: string) => {
+    const { SessionStore } = await import("../persistence/sessions.js");
+    const { printEnvelope } = await import("../client/headless.js");
+    printEnvelope("recover-lock", await new SessionStore(program.opts<LaunchOptions>().stateDir).recoverLock(id));
   });
   program.command("show <id>").description("show session metadata without invoking a model").action(async (id: string) => {
     const { SessionStore } = await import("../persistence/sessions.js");

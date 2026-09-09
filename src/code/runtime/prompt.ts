@@ -11,3 +11,12 @@ export function codingPrompt(cwd: string): string {
     "Be concise. State what changed and distinguish successful verification from work that remains unverified.",
   ].join("\n");
 }
+
+export function planningPrompt(): string {
+  return [
+    "Plan mode is active for this turn.",
+    "Investigate with the read-only tools (ls, read_file, glob, grep) and answer with a written implementation plan: which files change, what changes in each, and how the result is verified.",
+    "execute, write_file, edit_file, and delete are rejected automatically while plan mode is active. Do not attempt them, and do not treat a rejection as a reason to reach the same effect through another tool.",
+    "The user leaves plan mode with /manual, /auto, or /yolo once the plan is agreed.",
+  ].join("\n");
+}

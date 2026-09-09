@@ -14,6 +14,15 @@ export function messageText(content: unknown): string {
   }).join("");
 }
 
+/** Reasoning summaries arrive as `{ type: "reasoning", reasoning }` content blocks, which `messageText` drops. */
+export function reasoningText(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content.map((part: unknown) => {
+    if (part && typeof part === "object" && "type" in part && part.type === "reasoning" && "reasoning" in part && typeof part.reasoning === "string") return part.reasoning;
+    return "";
+  }).join("");
+}
+
 export function errorText(error: unknown): string {
   let text = error instanceof Error ? error.message : "Unknown coding-agent error";
   for (const key of [process.env.DCODE_API_KEY, process.env.OPENAI_API_KEY]) {

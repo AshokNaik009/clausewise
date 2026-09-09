@@ -46,7 +46,7 @@ describe("coding-agent approval boundaries", () => {
   it("gates shell, writes, deletion, and delegation by default", () => {
     const policy = createInterruptPolicy();
     for (const name of ["execute", "write_file", "edit_file", "delete", "task"]) {
-      expect(policy[name]).toEqual({ allowedDecisions: ["approve", "reject"] });
+      expect(policy[name]).toEqual({ allowedDecisions: ["approve", "reject", "edit"] });
     }
   });
 });

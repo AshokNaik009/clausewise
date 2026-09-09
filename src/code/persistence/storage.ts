@@ -30,7 +30,10 @@ export async function readJson(path: string): Promise<unknown> {
 }
 
 export async function atomicJson(path: string, value: unknown): Promise<void> {
-  const content = `${JSON.stringify(value)}\n`;
+  await atomicText(path, `${JSON.stringify(value)}\n`);
+}
+
+export async function atomicText(path: string, content: string): Promise<void> {
   if (Buffer.byteLength(content) > 64 * 1024 * 1024) throw new Error("Session checkpoint reached the 64 MiB limit. Start a new session; the last saved checkpoint is preserved.");
   const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
   const handle = await open(temporary, "wx", 0o600);
