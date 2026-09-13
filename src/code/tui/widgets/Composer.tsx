@@ -25,7 +25,11 @@ export function Composer({ disabled, submit, draft, onDraft, history = [], queue
   while (tokenStart > 0 && !/\s/u.test(chars[tokenStart - 1] ?? " ")) tokenStart--;
   const token = chars.slice(tokenStart, cursor).join("");
   const commands: Completion[] = value.startsWith("/") && !/\s/u.test(value)
-    ? COMMANDS.filter((entry) => entry.name.startsWith(value.slice(1)) || entry.aliases.some((alias: string) => alias.startsWith(value.slice(1)))).map((entry) => ({ insert: `/${entry.name} `, label: `/${entry.name}`, description: entry.description }))
+    ? COMMANDS
+      .filter((entry) => entry.name.startsWith(value.slice(1)) || entry.aliases.some((alias: string) => alias.startsWith(value.slice(1))))
+      /** Closest match first: `/pl` should offer `/plan` before `/plugins`. */
+      .slice().sort((a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name))
+      .map((entry) => ({ insert: `/${entry.name} `, label: `/${entry.name}`, description: entry.description }))
     : [];
   const fileQuery = !commands.length && token.startsWith("@") ? token.slice(1) : undefined;
   const options: Completion[] = dismissed === token ? [] : commands.length ? commands : fileQuery === undefined ? [] : matchFiles(files, fileQuery, 8).map((path) => ({ insert: `@${path} `, label: path }));

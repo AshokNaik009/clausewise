@@ -9,6 +9,7 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "start": "tsx --env-file=.env src/cli.ts",
     "code": "tsx src/code/cli.ts",
+    "code:preview": "tsx src/code/tui/preview.tsx",
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",
     "test:sanity": "tsx test/sanity.ts",
